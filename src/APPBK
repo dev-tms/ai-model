@@ -1,0 +1,472 @@
+// import { FormEvent, useEffect, useRef, useState } from 'react';
+// import { Theme } from './settings/types';
+// import { AnalyticsDashboard } from './components/generated/AnalyticsDashboard';
+// import { MessageSquare, X, Send, PhoneCall, PhoneOff } from 'lucide-react';
+// //192.168.40.84:8000/ws/audio
+// const DEFAULT_WEBSOCKET_URL = 'wss://echo.websocket.events/';
+
+// const convertFloat32ToInt16PCM = (input: Float32Array): Int16Array => {
+//   const output = new Int16Array(input.length);
+
+//   for (let index = 0; index < input.length; index += 1) {
+//     const sample = Math.max(-1, Math.min(1, input[index]));
+//     output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+//   }
+
+//   return output;
+// };
+
+// type AssistantMessage = {
+//   id: string;
+//   sender: 'user' | 'assistant';
+//   text: string;
+// };
+
+// let theme: Theme = 'light';
+
+// function App() {
+//   const [assistantOpen, setAssistantOpen] = useState(false);
+//   const [assistantMode, setAssistantMode] = useState<'chat' | 'call'>('chat');
+//   const [assistantInput, setAssistantInput] = useState('');
+//   const [isCallRecording, setIsCallRecording] = useState(false);
+//   const [captureError, setCaptureError] = useState<string | null>(null);
+//   const [audioBufferCount, setAudioBufferCount] = useState(0);
+//   const [audioPreview, setAudioPreview] = useState<number[]>([]);
+//   const [websocketStatus, setWebsocketStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
+//   const [isLoadingResponse, setIsLoadingResponse] = useState(false);
+//   const [assistantHistory, setAssistantHistory] = useState<AssistantMessage[]>([
+//     {
+//       id: 'assistant-welcome',
+//       sender: 'assistant',
+//       text: 'Hello! I’m your AI Assistant. Tap Chat to start typing or Call for voice interaction.',
+//     },
+//   ]);
+
+//   const audioContextRef = useRef<AudioContext | null>(null);
+//   const mediaStreamRef = useRef<MediaStream | null>(null);
+//   const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+//   const processorRef = useRef<ScriptProcessorNode | null>(null);
+//   const websocketRef = useRef<WebSocket | null>(null);
+//   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+
+//   function setTheme(theme: Theme) {
+//     if (theme === 'dark') {
+//       document.documentElement.classList.add('dark');
+//     } else {
+//       document.documentElement.classList.remove('dark');
+//     }
+//   }
+
+//   const closeWebSocket = () => {
+//     if (websocketRef.current) {
+//       websocketRef.current.onopen = null;
+//       websocketRef.current.onmessage = null;
+//       websocketRef.current.onerror = null;
+//       websocketRef.current.onclose = null;
+//       websocketRef.current.close();
+//       websocketRef.current = null;
+//     }
+
+//     setWebsocketStatus('disconnected');
+//   };
+
+//   const connectWebSocket = () => {
+//     if (websocketRef.current?.readyState === WebSocket.OPEN) {
+//       return;
+//     }
+
+//     setWebsocketStatus('connecting');
+
+//     const socket = new WebSocket(DEFAULT_WEBSOCKET_URL);
+//     socket.binaryType = 'arraybuffer';
+
+//     socket.onopen = () => {
+//       setWebsocketStatus('connected');
+//     };
+
+//     socket.onerror = () => {
+//       setWebsocketStatus('error');
+//       setCaptureError('WebSocket connection failed. Audio will still be logged locally.');
+//     };
+
+//     socket.onclose = () => {
+//       if (websocketRef.current === socket) {
+//         websocketRef.current = null;
+//       }
+
+//       setWebsocketStatus('disconnected');
+//     };
+
+//     websocketRef.current = socket;
+//   };
+
+//   const stopMicrophoneCapture = () => {
+//     const processor = processorRef.current;
+//     if (processor) {
+//       processor.disconnect();
+//       processor.onaudioprocess = null;
+//     }
+
+//     mediaStreamSourceRef.current?.disconnect();
+
+//     processorRef.current = null;
+//     mediaStreamSourceRef.current = null;
+
+//     void audioContextRef.current?.close().catch(() => undefined);
+//     audioContextRef.current = null;
+
+//     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+//     mediaStreamRef.current = null;
+
+//     closeWebSocket();
+//   };
+
+//   const sendAudioChunk = (pcmBuffer: Int16Array) => {
+//     const socket = websocketRef.current;
+
+//     if (!socket || socket.readyState !== WebSocket.OPEN) {
+//       return;
+//     }
+
+//     const chunk = new Int16Array(pcmBuffer);
+//     socket.send(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+//     console.info('[WebSocket Audio Chunk]', pcmBuffer.byteLength);
+//   };
+
+//   const handleAudioBuffer = (inputData: Float32Array) => {
+//     const pcmBuffer = convertFloat32ToInt16PCM(inputData);
+//     console.info('[PCM Audio Buffer]', pcmBuffer);
+//     sendAudioChunk(pcmBuffer);
+//     setAudioBufferCount((count) => count + 1);
+//     setAudioPreview(Array.from(pcmBuffer.slice(0, 8)));
+//   };
+
+//   const startMicrophoneCapture = async () => {
+//     if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+//       throw new Error('This browser does not support microphone capture.');
+//     }
+
+//     stopMicrophoneCapture();
+
+//     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+//     const AudioContextCtor = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+//     if (!AudioContextCtor) {
+//       throw new Error('AudioContext is not supported in this browser.');
+//     }
+
+//     const context = new AudioContextCtor();
+//     const source = context.createMediaStreamSource(stream);
+//     const processor = context.createScriptProcessor(4096, 1, 1);
+
+//     connectWebSocket();
+
+//     processor.onaudioprocess = (event) => {
+//       const inputData = event.inputBuffer.getChannelData(0);
+//       handleAudioBuffer(inputData);
+//     };
+
+//     source.connect(processor);
+//     processor.connect(context.destination);
+
+//     audioContextRef.current = context;
+//     mediaStreamRef.current = stream;
+//     mediaStreamSourceRef.current = source;
+//     processorRef.current = processor;
+
+//     await context.resume();
+//   };
+
+//   useEffect(() => {
+//     return () => {
+//       stopMicrophoneCapture();
+//     };
+//   }, []);
+
+//   useEffect(() => {
+//     if (chatScrollRef.current) {
+//       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+//     }
+//   }, [assistantHistory, isLoadingResponse]);
+
+//   const openAssistant = (mode: 'chat' | 'call' = 'chat') => {
+//     setAssistantMode(mode);
+//     setAssistantOpen(true);
+//     if (mode !== 'call') {
+//       setIsCallRecording(false);
+//     }
+//   };
+
+//   const closeAssistant = () => {
+//     setAssistantOpen(false);
+//     setIsCallRecording(false);
+//     setCaptureError(null);
+//     stopMicrophoneCapture();
+//   };
+
+//   const endVoiceCall = () => {
+//     setIsCallRecording(false);
+//     setCaptureError(null);
+//     stopMicrophoneCapture();
+//     const endMessage: AssistantMessage = {
+//       id: `user-voice-end-${Date.now()}`,
+//       sender: 'user',
+//       text: '🛑 Ended the voice call.',
+//     };
+//     setAssistantHistory((prev) => [...prev, endMessage]);
+//   };
+
+//   const handleVoiceCallToggle = async () => {
+//     if (isCallRecording) {
+//       endVoiceCall();
+//       return;
+//     }
+
+//     setIsCallRecording(true);
+//     setAudioBufferCount(0);
+//     setAudioPreview([]);
+//     setCaptureError(null);
+
+//     const userMessage: AssistantMessage = {
+//       id: `user-voice-${Date.now()}`,
+//       sender: 'user',
+//       text: '🔊 Started a voice session.',
+//     };
+
+//     setAssistantHistory((prev) => [...prev, userMessage]);
+
+//     const reply: AssistantMessage = {
+//       id: `assistant-voice-${Date.now()}`,
+//       sender: 'assistant',
+//       text: 'Voice call mode is ready. Your microphone audio is being captured and converted to 16-bit PCM in the browser.',
+//     };
+
+//     setAssistantHistory((prev) => [...prev, reply]);
+
+//     try {
+//       await startMicrophoneCapture();
+//     } catch (error) {
+//       const message = error instanceof Error ? error.message : 'Unable to start microphone capture.';
+//       setCaptureError(message);
+//       setIsCallRecording(false);
+//       stopMicrophoneCapture();
+//     }
+//   };
+
+//   const handleAssistantSend = async (event: FormEvent<HTMLFormElement>) => {
+//     event.preventDefault();
+//     const trimmed = assistantInput.trim();
+//     if (!trimmed) return;
+
+//     const userMessage: AssistantMessage = {
+//       id: `user-${Date.now()}`,
+//       sender: 'user',
+//       text: trimmed,
+//     };
+
+//     setAssistantHistory((prev) => [...prev, userMessage]);
+//     setAssistantInput('');
+//     setIsLoadingResponse(true);
+
+//     try {
+//       const response = await fetch('http://192.168.40.150:8000/chat/text', {
+//         method: 'POST',
+//         headers: {
+//           'Content-Type': 'application/json',
+//         },
+//         body: JSON.stringify({ text: trimmed }),
+//       });
+
+      
+
+//       if (!response.ok) {
+//         throw new Error(`Request failed with status ${response.status}`);
+//       }
+
+//       const data = await response.json();
+//       const replyText = typeof data?.reply === 'string'
+//         ? data.reply
+//         : typeof data?.agent_reply === 'string'
+//           ? data.agent_reply
+//           : 'The assistant returned an empty response.';
+
+//       const reply: AssistantMessage = {
+//         id: `assistant-${Date.now()}`,
+//         sender: 'assistant',
+//         text: replyText,
+//       };
+
+//       setAssistantHistory((prev) => [...prev, reply]);
+//     } catch (error) {
+//       const errorMessage = error instanceof Error ? error.message : 'Unable to reach the assistant service.';
+//       const reply: AssistantMessage = {
+//         id: `assistant-error-${Date.now()}`,
+//         sender: 'assistant',
+//         text: `Sorry, I couldn’t reach the assistant service. ${errorMessage}`,
+//       };
+
+//       setAssistantHistory((prev) => [...prev, reply]);
+//     } finally {
+//       setIsLoadingResponse(false);
+//     }
+//   };
+
+//   setTheme(theme);
+
+//   return (
+//     <>
+//       <AnalyticsDashboard onOpenAssistant={openAssistant} />
+
+//       <button
+//         type="button"
+//         onClick={() => openAssistant('chat')}
+//         className="fixed bottom-6 right-6 z-50 inline-flex items-center gap-3 rounded-full bg-slate-950 px-5 py-4 text-sm font-semibold text-white shadow-2xl shadow-slate-950/20 transition hover:bg-slate-800"
+//       >
+//         <MessageSquare size={18} />
+//         Talk to AI Assistant
+//       </button>
+
+//       {assistantOpen && (
+//         <div className="fixed inset-0 z-50 flex items-end justify-end bg-slate-950/30 backdrop-blur-sm px-4 py-6 sm:items-center sm:px-6">
+//           <div className="w-full max-w-xl overflow-hidden rounded-[32px] bg-white shadow-2xl sm:h-[90vh]">
+//             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+//               <div>
+//                 <p className="text-lg font-semibold text-slate-400">Hello! Ask us anything about Praangan Elitus Project!</p>
+//               </div>
+//               <button
+//                 type="button"
+//                 onClick={closeAssistant}
+//                 className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-slate-700 transition hover:bg-slate-200"
+//                 aria-label="Close assistant panel"
+//               >
+//                 <X size={20} />
+//               </button>
+//             </div>
+
+//             <div className="flex flex-col gap-4 border-b border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+//               <div className="flex items-center gap-3">
+//                 <button
+//                   type="button"
+//                   onClick={() => setAssistantMode('chat')}
+//                   className={`rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === 'chat' ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+//                 >
+//                   Chat with AI
+//                 </button>
+//                 <button
+//                   type="button"
+//                   onClick={() => setAssistantMode('call')}
+//                   className={`rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === 'call' ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+//                 >
+//                   Voice Call with AI
+//                 </button>
+//               </div>
+//             </div>
+
+//             <div className="flex h-[calc(100%-212px)] flex-col overflow-hidden bg-slate-50 px-6 py-6 sm:h-[calc(100%-150px)]">
+//               {assistantMode === 'chat' ? (
+//                 <div className="flex h-full flex-col">
+//                   <div className="flex-1 overflow-y-auto pr-1" ref={chatScrollRef}>
+//                     <div className="space-y-4">
+//                       {assistantHistory.map((message) => (
+//                         <div
+//                           key={message.id}
+//                           className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+//                         >
+//                           <div className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${
+//                             message.sender === 'user'
+//                               ? 'bg-slate-950 text-white rounded-br-none'
+//                               : 'bg-white text-slate-900 rounded-bl-none border border-slate-200'
+//                           }`}>
+//                             <p>{message.text}</p>
+//                           </div>
+//                         </div>
+//                       ))}
+//                       {isLoadingResponse && (
+//                         <div className="flex justify-start">
+//                           <div className="max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm bg-white text-slate-900 rounded-bl-none border border-slate-200">
+//                             <div className="flex items-center gap-1.5">
+//                               <span className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+//                               <span className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+//                               <span className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+//                             </div>
+//                           </div>
+//                         </div>
+//                       )}
+//                     </div>
+//                   </div>
+//                   <form onSubmit={handleAssistantSend} className="mt-4 flex flex-col gap-3 sm:flex-row">
+//                     <input
+//                       type="text"
+//                       value={assistantInput}
+//                       onChange={(event) => setAssistantInput(event.target.value)}
+//                       placeholder="Ask your AI Assistant anything..."
+//                       className="min-w-0 flex-1 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+//                     />
+//                     <button
+//                       type="submit"
+//                       disabled={!assistantInput.trim() || isLoadingResponse}
+//                       className="inline-flex items-center justify-center gap-2 rounded-full bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+//                     >
+//                       <Send size={16} />
+//                       Send
+//                     </button>
+//                   </form>
+//                 </div>
+//               ) : (
+//                 <div className="flex h-full flex-col justify-between gap-6">
+//                   <div className="space-y-4">
+                    
+//                     <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+//                       <p className="font-semibold text-slate-900">Current status</p>
+//                       <p className="mt-2 text-sm text-slate-600">
+//                         {isCallRecording
+//                           ? 'Voice session is active. Each microphone block is converted to 16-bit PCM and logged in the browser console.'
+//                           : 'Tap the button below to start your voice interaction.'}
+//                       </p>
+//                       <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+//                         <p className="font-medium text-slate-900">PCM capture preview</p>
+//                         <p className="mt-2">Buffers captured: {audioBufferCount}</p>
+//                         <p className="mt-2">Latest PCM samples: {audioPreview.length > 0 ? audioPreview.join(', ') : 'Waiting for audio...'}</p>
+//                         <p className="mt-2">WebSocket: {websocketStatus}</p>
+//                       </div>
+//                       {captureError && <p className="mt-3 text-sm font-medium text-red-600">{captureError}</p>}
+//                     </div>
+//                   </div>
+//                   <div className="flex flex-wrap gap-3">
+//                     <button
+//                       type="button"
+//                       onClick={() => {
+//                         void handleVoiceCallToggle();
+//                       }}
+//                       className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-3 rounded-full px-5 py-4 text-sm font-semibold text-white shadow-lg transition ${
+//                         isCallRecording ? 'bg-red-600 hover:bg-red-700' : 'bg-slate-950 hover:bg-slate-800'
+//                       }`}
+//                     >
+//                       {isCallRecording && (
+//                         <span className="inline-flex h-3.5 w-3.5 rounded-full bg-white animate-pulse" />
+//                       )}
+//                       <PhoneCall size={18} />
+//                       {isCallRecording ? 'Recording Voice...' : 'Start Voice Call'}
+//                     </button>
+//                     {isCallRecording && (
+//                       <button
+//                         type="button"
+//                         onClick={endVoiceCall}
+//                         className="flex-1 min-w-[180px] inline-flex items-center justify-center gap-2 rounded-full border border-slate-300 bg-white px-5 py-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100"
+//                       >
+//                         <PhoneOff size={18} />
+//                         End Voice Call
+//                       </button>
+//                     )}
+//                   </div>
+//                 </div>
+//               )}
+//             </div>
+//           </div>
+//         </div>
+//       )}
+//     </>
+//   );
+// }
+
+// export default App;
