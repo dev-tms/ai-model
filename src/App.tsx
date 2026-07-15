@@ -1,4 +1,3 @@
-
 // import { FormEvent, useEffect, useRef, useState } from 'react';
 // import { Theme } from './settings/types';
 // import { AnalyticsDashboard } from './components/generated/AnalyticsDashboard';
@@ -17,8 +16,6 @@
 // // treat the utterance as finished and send it to the backend.
 // const SILENCE_DURATION_MS = 2000;
 // const MAX_UTTERANCE_MS = 8000; // force-finalize safety net if silence never detected
-
-
 
 // const convertFloat32ToInt16PCM = (input: Float32Array): Int16Array => {
 //   const output = new Int16Array(input.length);
@@ -622,7 +619,7 @@
 //     sampleRate: 16000,
 //   },
 // });
-    
+
 //     const AudioContextCtor =
 //       window.AudioContext ||
 //       (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
@@ -1113,8 +1110,6 @@ const SILENCE_RMS_THRESHOLD = 0.012;
 const SILENCE_DURATION_MS = 2000;
 const MAX_UTTERANCE_MS = 8000; // force-finalize safety net if silence never detected
 
-
-
 const convertFloat32ToInt16PCM = (input: Float32Array): Int16Array => {
   const output = new Int16Array(input.length);
 
@@ -1168,6 +1163,77 @@ const encodeInt16PCMChunksToWav = (chunks: Int16Array[], sampleRate: number): Bl
   }
 
   return new Blob([buffer], { type: 'audio/wav' });
+};
+
+const extractPcmFromWav = (wavBytes: ArrayBuffer): Uint8Array => {
+  const view = new DataView(wavBytes);
+  let offset = 12;
+  while (offset < view.byteLength - 8) {
+    const chunkId = String.fromCharCode(
+      view.getUint8(offset),
+      view.getUint8(offset + 1),
+      view.getUint8(offset + 2),
+      view.getUint8(offset + 3)
+    );
+    const chunkSize = view.getUint32(offset + 4, true);
+    if (chunkId === 'data') {
+      return new Uint8Array(wavBytes, offset + 8, chunkSize);
+    }
+    offset += 8 + chunkSize;
+  }
+  return new Uint8Array(wavBytes);
+};
+
+const buildWavFromPcmParts = (pcmParts: Uint8Array[], sampleRate: number): ArrayBuffer => {
+  const totalPcm = pcmParts.reduce((sum, part) => sum + part.byteLength, 0);
+  const buffer = new ArrayBuffer(44 + totalPcm);
+  const view = new DataView(buffer);
+
+  const writeString = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) {
+      view.setUint8(offset + i, value.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + totalPcm, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, totalPcm, true);
+
+  let offset = 44;
+  for (const part of pcmParts) {
+    new Uint8Array(buffer, offset, part.byteLength).set(part);
+    offset += part.byteLength;
+  }
+
+  return buffer;
+};
+
+const pcmBytesToAudioBuffer = (
+  pcmBytes: Uint8Array,
+  sampleRate: number,
+  audioCtx: AudioContext
+): AudioBuffer => {
+  const sampleCount = pcmBytes.byteLength / 2;
+  const int16View = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, sampleCount);
+
+  const audioBuffer = audioCtx.createBuffer(1, sampleCount, sampleRate);
+  const channelData = audioBuffer.getChannelData(0);
+
+  for (let i = 0; i < sampleCount; i += 1) {
+    channelData[i] = int16View[i] / (int16View[i] < 0 ? 0x8000 : 0x7fff);
+  }
+
+  return audioBuffer;
 };
 
 const decodeBase64AudioToArrayBuffer = (raw: string): ArrayBuffer | null => {
@@ -1307,9 +1373,15 @@ const VOICE_WELCOME_MESSAGE: AssistantMessage = {
   text: 'Hello! I’m your AI Assistant. Start a voice call to speak with me.',
 };
 
+const LIVE_WELCOME_MESSAGE: AssistantMessage = {
+  id: 'assistant-welcome-live',
+  sender: 'assistant',
+  text: 'Hello! Start a live session to speak with me in real time.',
+};
+
 function App() {
   const [assistantOpen, setAssistantOpen] = useState(false);
-  const [assistantMode, setAssistantMode] = useState<'chat' | 'call'>('chat');
+  const [assistantMode, setAssistantMode] = useState<'chat' | 'call' | 'live'>('chat');
   const [assistantInput, setAssistantInput] = useState('');
   const [isCallRecording, setIsCallRecording] = useState(false);
   const [isProcessingTurn, setIsProcessingTurn] = useState(false);
@@ -1322,9 +1394,44 @@ function App() {
   const [isLoadingResponse, setIsLoadingResponse] = useState(false);
   const [chatHistory, setChatHistory] = useState<AssistantMessage[]>([CHAT_WELCOME_MESSAGE]);
   const [voiceHistory, setVoiceHistory] = useState<AssistantMessage[]>([VOICE_WELCOME_MESSAGE]);
+  const [liveHistory, setLiveHistory] = useState<AssistantMessage[]>([LIVE_WELCOME_MESSAGE]);
+
+  // --- Live Stream tab state ---
+  const [liveStatus, setLiveStatus] = useState<
+    'idle' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'error'
+  >('idle');
+  const [liveStatusText, setLiveStatusText] = useState('Press Start to connect');
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [liveReply, setLiveReply] = useState('');
+  const [liveMicReady, setLiveMicReady] = useState(false);
+  const [liveSessionActive, setLiveSessionActive] = useState(false);
+
+  const liveWsRef = useRef<WebSocket | null>(null);
+  const liveAudioCtxRef = useRef<AudioContext | null>(null);
+  const liveProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const liveMicSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const liveSilentGainRef = useRef<GainNode | null>(null);
+  const liveMicStreamRef = useRef<MediaStream | null>(null);
+  const liveSessionIdRef = useRef<string>(
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID().slice(0, 8)
+      : `live-${Date.now()}`
+  );
+  const livePcmAccumulatorRef = useRef<Uint8Array[]>([]);
+  const liveCurrentAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Streaming playback (chunk-by-chunk, no waiting for reply_end)
+  const livePlaybackCtxRef = useRef<AudioContext | null>(null);
+  const liveNextPlayTimeRef = useRef<number>(0);
+  const liveActiveSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const liveIsPlayingRef = useRef<boolean>(false);
+
+  const LIVE_SAMPLE_RATE = 16000; // mic capture rate (matches server input expectation)
+  const LIVE_OUTPUT_SAMPLE_RATE = 24000; // Gemini Live style TTS output rate — adjust to match your backend
+  const LIVE_FRAME_SIZE = 512;
 
   const [keepConnectionOpen, setKeepConnectionOpen] = useState(false);
-
+  const livePendingAssistantIdRef = useRef<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -1350,15 +1457,16 @@ function App() {
   const pendingUserAudioUrlRef = useRef<string | null>(null);
   const utterancePcmChunksRef = useRef<Int16Array[]>([]);
   const typingSoundRef = useRef<HTMLAudioElement | null>(null);
-  const activeHistory = assistantMode === 'chat' ? chatHistory : voiceHistory;
+  // const activeHistory = assistantMode === 'chat' ? chatHistory : voiceHistory;
+  const activeHistory =
+    assistantMode === 'chat' ? chatHistory : assistantMode === 'call' ? voiceHistory : liveHistory;
 
   // Add near your other refs
-const chatSessionIdRef = useRef<string>(
-  typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `chat-session-${Date.now()}`
-);
-
+  const chatSessionIdRef = useRef<string>(
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `chat-session-${Date.now()}`
+  );
 
   function setTheme(theme: Theme) {
     if (theme === 'dark') {
@@ -1523,8 +1631,7 @@ const chatSessionIdRef = useRef<string>(
         break;
 
       case 'response': {
-    // uncommnt if you dont want  assistant complete the sentense then capture another input
-
+        // uncommnt if you dont want  assistant complete the sentense then capture another input
 
         // endProcessingTurn();
         const userText = typeof payload.user_text === 'string' ? payload.user_text.trim() : '';
@@ -1560,17 +1667,17 @@ const chatSessionIdRef = useRef<string>(
         //   closeWebSocket();
         // }
 
-    // below code is only for if assistant complete the sentense then capture another input
+        // below code is only for if assistant complete the sentense then capture another input
         if (!agentReply) {
           endProcessingTurn();
         }
-        
+
         break;
       }
 
       case 'error':
-    // uncommnt if you dont want  assistant complete the sentense then capture another input
-    console.log("error",payload.message)
+        // uncommnt if you dont want  assistant complete the sentense then capture another input
+        console.log('error', payload.message);
 
         // endProcessingTurn();
         setCaptureError(
@@ -1583,8 +1690,8 @@ const chatSessionIdRef = useRef<string>(
         break;
 
       case 'warning':
-    // uncommnt if you dont want  assistant complete the sentense then capture another input
-    console.log("warning",payload.message)
+        // uncommnt if you dont want  assistant complete the sentense then capture another input
+        console.log('warning', payload.message);
 
         // endProcessingTurn();
         if (typeof payload.message === 'string') {
@@ -1747,16 +1854,16 @@ const chatSessionIdRef = useRef<string>(
 
     // const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-   const stream = await navigator.mediaDevices.getUserMedia({
-  audio: {
-    echoCancellation: true,   // removes the assistant's own TTS audio if picked up by mic (critical for barge-in/call scenarios)
-    noiseSuppression: true,   // suppresses steady background noise (fans, hum, traffic)
-    autoGainControl: true,    // normalizes volume so quiet speech isn't under-captured
-    channelCount: 1,
-    sampleRate: 16000,
-  },
-});
-    
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true, // removes the assistant's own TTS audio if picked up by mic (critical for barge-in/call scenarios)
+        noiseSuppression: true, // suppresses steady background noise (fans, hum, traffic)
+        autoGainControl: true, // normalizes volume so quiet speech isn't under-captured
+        channelCount: 1,
+        sampleRate: 16000,
+      },
+    });
+
     const AudioContextCtor =
       window.AudioContext ||
       (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
@@ -1925,12 +2032,16 @@ const chatSessionIdRef = useRef<string>(
     setIsLoadingResponse(true);
 
     try {
-      const response = await fetch("https://192.168.40.150:8000/chat/text", {
+      const response = await fetch('https://192.168.40.150:8000/chat/text', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ text: trimmed,session_id: chatSessionIdRef.current, project_id: DEFAULT_PROJECT_ID }),
+        body: JSON.stringify({
+          text: trimmed,
+          session_id: chatSessionIdRef.current,
+          project_id: DEFAULT_PROJECT_ID,
+        }),
       });
 
       if (!response.ok) {
@@ -1987,6 +2098,362 @@ const chatSessionIdRef = useRef<string>(
     }
   };
 
+  // Live tab
+
+  const acquireLiveMic = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: LIVE_SAMPLE_RATE,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+      liveMicStreamRef.current = stream;
+      setLiveMicReady(true);
+      setLiveStatus('idle');
+      setLiveStatusText('Press Start to connect');
+    } catch (error) {
+      setLiveMicReady(false);
+      setLiveStatus('error');
+      const message = error instanceof Error ? error.message : 'Microphone access denied.';
+      setLiveStatusText(message);
+    }
+  };
+
+  const attachLiveAudioProcessing = () => {
+    const stream = liveMicStreamRef.current;
+    if (!stream) throw new Error('No microphone stream available.');
+
+    const AudioContextCtor =
+      window.AudioContext ||
+      (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioContextCtor) throw new Error('AudioContext is not supported in this browser.');
+
+    const audioCtx = new AudioContextCtor({ sampleRate: LIVE_SAMPLE_RATE });
+    const micSource = audioCtx.createMediaStreamSource(stream);
+
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0;
+    silentGain.connect(audioCtx.destination);
+
+    const processor = audioCtx.createScriptProcessor(LIVE_FRAME_SIZE, 1, 1);
+
+    processor.onaudioprocess = event => {
+      const socket = liveWsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+      const inputData = event.inputBuffer.getChannelData(0);
+      const pcm = new Int16Array(inputData.length);
+      for (let i = 0; i < inputData.length; i += 1) {
+        const sample = Math.max(-1, Math.min(1, inputData[i]));
+        pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      }
+      console.log('[Live][REQ] audio chunk sent →', pcm.buffer.byteLength, 'bytes');
+      socket.send(pcm.buffer);
+    };
+
+    micSource.connect(processor);
+    processor.connect(silentGain);
+
+    liveAudioCtxRef.current = audioCtx;
+    liveMicSourceRef.current = micSource;
+    liveSilentGainRef.current = silentGain;
+    liveProcessorRef.current = processor;
+  };
+
+  const detachLiveAudioProcessing = () => {
+    liveProcessorRef.current?.disconnect();
+    liveMicSourceRef.current?.disconnect();
+    liveSilentGainRef.current?.disconnect();
+    void liveAudioCtxRef.current?.close().catch(() => undefined);
+
+    liveProcessorRef.current = null;
+    liveMicSourceRef.current = null;
+    liveSilentGainRef.current = null;
+    liveAudioCtxRef.current = null;
+  };
+
+  const ensureLivePlaybackContext = (): AudioContext => {
+    if (!livePlaybackCtxRef.current || livePlaybackCtxRef.current.state === 'closed') {
+      const AudioContextCtor =
+        window.AudioContext ||
+        (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      livePlaybackCtxRef.current = new AudioContextCtor({ sampleRate: LIVE_OUTPUT_SAMPLE_RATE });
+      liveNextPlayTimeRef.current = 0;
+    }
+    return livePlaybackCtxRef.current;
+  };
+
+  const scheduleLiveAudioChunk = (pcmBytes: Uint8Array) => {
+    if (pcmBytes.byteLength === 0) return;
+
+    const audioCtx = ensureLivePlaybackContext();
+    const audioBuffer = pcmBytesToAudioBuffer(pcmBytes, LIVE_OUTPUT_SAMPLE_RATE, audioCtx);
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination);
+
+    const now = audioCtx.currentTime;
+    const startAt = Math.max(liveNextPlayTimeRef.current, now);
+    source.start(startAt);
+    liveNextPlayTimeRef.current = startAt + audioBuffer.duration;
+
+    liveActiveSourcesRef.current.push(source);
+    source.onended = () => {
+      liveActiveSourcesRef.current = liveActiveSourcesRef.current.filter(s => s !== source);
+      if (
+        liveActiveSourcesRef.current.length === 0 &&
+        audioCtx.currentTime >= liveNextPlayTimeRef.current - 0.02
+      ) {
+        liveIsPlayingRef.current = false;
+        setLiveStatus('listening');
+        setLiveStatusText('Listening for speech...');
+      }
+    };
+
+    if (!liveIsPlayingRef.current) {
+      liveIsPlayingRef.current = true;
+      setLiveStatus('speaking');
+      setLiveStatusText('Agent speaking...');
+    }
+  };
+
+  const stopLiveCurrentAudio = () => {
+    liveActiveSourcesRef.current.forEach(source => {
+      try {
+        source.onended = null;
+        source.stop();
+      } catch {
+        // already stopped
+      }
+    });
+    liveActiveSourcesRef.current = [];
+    liveIsPlayingRef.current = false;
+    if (livePlaybackCtxRef.current) {
+      liveNextPlayTimeRef.current = livePlaybackCtxRef.current.currentTime;
+    }
+    livePcmAccumulatorRef.current = [];
+  };
+
+  const handleLiveBinaryMessage = (data: ArrayBuffer) => {
+    const pcm = extractPcmFromWav(data);
+    scheduleLiveAudioChunk(pcm); // plays immediately, streamed
+    livePcmAccumulatorRef.current.push(pcm); // kept only for optional post-hoc replay
+  };
+
+  type LiveControlMessage = {
+    type?: string;
+    project_id?: string;
+    session_id?: string;
+    text?: string;
+    full_text?: string;
+    message?: string;
+    timings?: Record<string, number>;
+  };
+
+  const handleLiveControlMessage = (raw: string) => {
+    let payload: LiveControlMessage;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    switch (payload.type) {
+      case 'ready':
+        setLiveStatus('listening');
+        setLiveStatusText('Listening for speech...');
+        break;
+
+      case 'listening':
+        setLiveStatus('listening');
+        setLiveStatusText('Listening...');
+        break;
+
+      case 'processing':
+        setLiveStatus('processing');
+        setLiveStatusText('Processing...');
+        break;
+
+      case 'transcript': {
+        const text = payload.text?.trim();
+        if (text) {
+          setLiveHistory(prev => [
+            ...prev,
+            { id: `user-live-${Date.now()}`, sender: 'user', text },
+          ]);
+        }
+        break;
+      }
+
+      case 'reply_start': {
+        livePcmAccumulatorRef.current = [];
+        const assistantId = `assistant-live-${Date.now()}`;
+        livePendingAssistantIdRef.current = assistantId;
+
+        // Only create the bubble now if we already have text; otherwise wait
+        // for reply_text to create it, so no empty bubble ever shows.
+        if (payload.text?.trim()) {
+          setLiveHistory(prev => [
+            ...prev,
+            { id: assistantId, sender: 'assistant', text: payload.text ?? '' },
+          ]);
+        }
+
+        setLiveStatus('speaking');
+        setLiveStatusText('Agent speaking...');
+        break;
+      }
+
+      case 'reply_text': {
+        const assistantId = livePendingAssistantIdRef.current;
+        const chunk = payload.text ?? '';
+        if (assistantId && chunk) {
+          setLiveHistory(prev => {
+            const exists = prev.some(m => m.id === assistantId);
+            if (exists) {
+              return prev.map(m => (m.id === assistantId ? { ...m, text: m.text + chunk } : m));
+            }
+            return [...prev, { id: assistantId, sender: 'assistant', text: chunk }];
+          });
+        }
+        break;
+      }
+
+      case 'reply_end': {
+        const parts = livePcmAccumulatorRef.current;
+        livePcmAccumulatorRef.current = [];
+        const assistantId = livePendingAssistantIdRef.current;
+        livePendingAssistantIdRef.current = null;
+        if (assistantId && parts.length > 0) {
+          const wavBuffer = buildWavFromPcmParts(parts, LIVE_OUTPUT_SAMPLE_RATE);
+          const url = URL.createObjectURL(new Blob([wavBuffer], { type: 'audio/wav' }));
+          setLiveHistory(prev =>
+            prev.map(m => (m.id === assistantId ? { ...m, audioUrl: url } : m))
+          );
+        }
+        break;
+      }
+
+      case 'interrupted':
+        stopLiveCurrentAudio();
+        setLiveStatus('listening');
+        setLiveStatusText('Listening...');
+        break;
+
+      case 'error':
+        setLiveStatus('error');
+        setLiveStatusText(payload.message ?? 'The assistant reported an error.');
+        break;
+
+      default:
+        break;
+    }
+  };
+  const startLiveSession = () => {
+    if (!liveMicStreamRef.current) {
+      void acquireLiveMic();
+      return;
+    }
+
+    const url = `wss://192.168.40.20:8000/ws/live?project_id=${encodeURIComponent(
+      DEFAULT_PROJECT_ID
+    )}&session_id=${encodeURIComponent(liveSessionIdRef.current)}`;
+    console.log('[Live][REQ] connecting →', url);
+    setLiveStatus('connecting');
+    setLiveStatusText('Connecting...');
+
+    const socket = new WebSocket(url);
+    socket.binaryType = 'arraybuffer';
+
+    socket.onopen = () => {
+      console.log('[Live][RES] WebSocket opened');
+      try {
+        attachLiveAudioProcessing();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to start audio.';
+        setLiveStatus('error');
+        setLiveStatusText(message);
+        socket.close();
+        return;
+      }
+      setLiveSessionActive(true);
+      setLiveStatus('listening');
+      setLiveStatusText('Listening for speech...');
+    };
+
+    socket.onmessage = event => {
+      if (event.data instanceof ArrayBuffer) {
+        console.log('[Live][RES] binary message received →', event.data.byteLength, 'bytes');
+        handleLiveBinaryMessage(event.data);
+        return;
+      }
+      console.log('[Live][RES] control message ←', event.data);
+      handleLiveControlMessage(event.data as string);
+    };
+
+    socket.onerror = () => {
+      setLiveStatus('error');
+      setLiveStatusText('Connection error');
+    };
+
+    socket.onclose = () => {
+      detachLiveAudioProcessing();
+      setLiveSessionActive(false);
+      setLiveStatus('idle');
+      setLiveStatusText('Disconnected — press Start');
+      liveWsRef.current = null;
+    };
+
+    liveWsRef.current = socket;
+  };
+
+  const stopLiveSession = () => {
+    const socket = liveWsRef.current;
+    if (socket) {
+      socket.onclose = null;
+      socket.close(1000, 'User stopped session');
+      liveWsRef.current = null;
+    }
+    detachLiveAudioProcessing();
+    stopLiveCurrentAudio();
+    void livePlaybackCtxRef.current?.close().catch(() => undefined);
+    livePlaybackCtxRef.current = null;
+    setLiveSessionActive(false);
+    setLiveStatus('idle');
+    setLiveStatusText('Press Start to connect');
+  };
+
+  const resetLiveSession = () => {
+    const socket = liveWsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: 'reset' }));
+    setLiveTranscript('');
+    setLiveReply('');
+    stopLiveCurrentAudio();
+  };
+
+  useEffect(() => {
+    if (assistantMode === 'live' && !liveMicStreamRef.current) {
+      void acquireLiveMic();
+    }
+  }, [assistantMode]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopLiveSession();
+      liveMicStreamRef.current?.getTracks().forEach(track => track.stop());
+    };
+  }, []);
+
   return (
     <>
       <AnalyticsDashboard onOpenAssistant={openAssistant} />
@@ -2038,11 +2505,18 @@ const chatSessionIdRef = useRef<string>(
                 >
                   Voice Call with AI
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setAssistantMode('live')}
+                  className={`cursor-pointer rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === 'live' ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                >
+                  Live Stream
+                </button>
               </div>
             </div>
 
             <div className="flex h-[calc(100%-212px)] flex-col overflow-hidden bg-slate-50 px-6 py-6 sm:h-[calc(100%-150px)]">
-              {assistantMode === 'chat' ? (
+              {assistantMode === 'chat' && (
                 <div className="flex h-full flex-col">
                   <div className="flex-1 overflow-y-auto pr-1" ref={chatScrollRef}>
                     <div className="space-y-4">
@@ -2106,7 +2580,9 @@ const chatSessionIdRef = useRef<string>(
                     </button>
                   </form>
                 </div>
-              ) : (
+              )}
+
+              {assistantMode === 'call' && (
                 <div className="flex h-full flex-col justify-between gap-6 overflow-y-auto">
                   <div className="space-y-4">
                     <div className="max-h-[500px] overflow-y-auto pr-1" ref={chatScrollRef}>
@@ -2136,20 +2612,9 @@ const chatSessionIdRef = useRef<string>(
                         {isProcessingTurn
                           ? 'Processing your Question...'
                           : isCallRecording
-                            ? "Ask anything about Praangan Elitus"
+                            ? 'Ask anything about Praangan Elitus'
                             : 'Tap the button below to start your voice interaction.'}
                       </p>
-                    {/* <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
-                        <p className="font-medium text-slate-900">PCM capture preview</p>
-                        <p className="mt-2">Buffers captured: {audioBufferCount}</p>
-                        <p className="mt-2">
-                          Latest PCM samples:{' '}
-                          {audioPreview.length > 0
-                            ? audioPreview.join(', ')
-                            : 'Waiting for audio...'}
-                        </p>
-                        <p className="mt-2">WebSocket: {websocketStatus}</p>
-                      </div> */}
                       {captureError && (
                         <p className="mt-3 text-sm font-medium text-red-600">{captureError}</p>
                       )}
@@ -2169,11 +2634,8 @@ const chatSessionIdRef = useRef<string>(
                       }`}
                     >
                       {isCallRecording && (
-                        // <span className="inline-flex h-3.5 w-3.5 rounded-full bg-white animate-spin" />
                         <div className="h-5 w-5 animate-spin rounded-full border-4 border-gray-200 border-t-red-500"></div>
-
                       )}
-                      {/* <PhoneCall size={18} /> */}
                       {isCallRecording ? 'Thinking...' : 'Start Voice Call'}
                     </button>
                     {isCallRecording && (
@@ -2188,7 +2650,6 @@ const chatSessionIdRef = useRef<string>(
                       </button>
                     )}
 
-                    {/* NEW: keep-connection toggle */}
                     <button
                       type="button"
                       onClick={() => setKeepConnectionOpen(prev => !prev)}
@@ -2203,7 +2664,6 @@ const chatSessionIdRef = useRef<string>(
                         : '🔓 Connection closes on panel close'}
                     </button>
 
-                    {/* NEW: explicit hard-close button */}
                     {keepConnectionOpen && (
                       <button
                         type="button"
@@ -2215,6 +2675,103 @@ const chatSessionIdRef = useRef<string>(
                       </button>
                     )}
                   </div>
+                </div>
+              )}
+
+              {assistantMode === 'live' && (
+                <div className="flex h-full flex-col justify-between gap-6 overflow-y-auto">
+                  <div className="space-y-4">
+                    <div className="max-h-[500px] overflow-y-auto pr-1" ref={chatScrollRef}>
+                      <div className="space-y-4">
+                        {liveHistory
+                          .filter(message => message.text.trim().length > 0 || message.audioUrl)
+                          .map(message => (
+                            <div
+                              key={message.id}
+                              className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                            >
+                              <div
+                                className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${
+                                  message.sender === 'user'
+                                    ? 'bg-slate-950 text-white rounded-br-none'
+                                    : 'bg-white text-slate-900 rounded-bl-none border border-slate-200'
+                                }`}
+                              >
+                                <p>{message.text}</p>
+                                {message.audioUrl && <MessageAudioPlayer src={message.audioUrl} />}
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+                      <p className="font-semibold text-slate-900">Current status</p>
+                      <p className="mt-2 text-sm text-slate-600">
+                        {liveStatus === 'processing'
+                          ? 'Processing your question...'
+                          : liveStatus === 'speaking'
+                            ? 'Agent is speaking...'
+                            : liveStatus === 'listening'
+                              ? 'Ask anything about Praangan Elitus'
+                              : liveStatus === 'error'
+                                ? liveStatusText
+                                : 'Tap the button below to start your live session.'}
+                      </p>
+                      {liveStatus === 'error' && (
+                        <p className="mt-3 text-sm font-medium text-red-600">{liveStatusText}</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={startLiveSession}
+                      disabled={!liveMicReady || liveSessionActive}
+                      className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-3 rounded-full px-5 py-4 text-sm font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                        liveSessionActive ? 'bg-emerald-600' : 'bg-slate-950 hover:bg-slate-800'
+                      }`}
+                    >
+                      {liveStatus === 'processing' && (
+                        <div className="h-5 w-5 animate-spin rounded-full border-4 border-gray-200 border-t-amber-500"></div>
+                      )}
+                      {liveSessionActive
+                        ? liveStatus === 'processing'
+                          ? 'Thinking...'
+                          : liveStatus === 'speaking'
+                            ? 'Speaking...'
+                            : 'Live session active'
+                        : 'Start Live Session'}
+                    </button>
+
+                    {liveSessionActive && (
+                      <button
+                        type="button"
+                        onClick={stopLiveSession}
+                        className="flex-1 min-w-[180px] inline-flex items-center justify-center gap-2 rounded-full border border-slate-300 bg-white px-5 py-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100"
+                      >
+                        <PhoneOff size={18} />
+                        End Live Session
+                      </button>
+                    )}
+
+                    {liveSessionActive && (
+                      <button
+                        type="button"
+                        onClick={resetLiveSession}
+                        className="flex-1 min-w-[180px] inline-flex items-center justify-center gap-2 rounded-full border border-slate-300 bg-white px-5 py-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100"
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </div>
+
+                  {!liveMicReady && (
+                    <p className="text-xs font-medium text-red-600">
+                      Microphone not ready — check browser permissions.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
