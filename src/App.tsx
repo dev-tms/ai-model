@@ -3,12 +3,14 @@ import { Theme } from './settings/types';
 import { AnalyticsDashboard } from './components/generated/AnalyticsDashboard';
 import { MessageSquare, X, Send, PhoneCall, PhoneOff, Play, Pause } from 'lucide-react';
 import typingSound from './typingSound.mp3';
+const HOST = '192.168.40.20:8000';   //Live   = 50.116.14.116:8000
+// const HOST = 'bzqwy4e98mrtiw-8000.proxy.runpod.net';
 // const CALL_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/audio';
 // const LIVE_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/live';
 // const CHAT_BASE_URL = 'https://192.168.40.20:8000/chat/text';
-const CALL_WS_BASE_URL = 'ws://localhost:8000/ws/audio';
-const LIVE_WS_BASE_URL = 'ws://localhost:8000/ws/live';
-const CHAT_BASE_URL = 'http://localhost:8000/chat/text';
+const CALL_WS_BASE_URL = `wss://${HOST}/ws/audio`;
+const LIVE_WS_BASE_URL = `wss://${HOST}/ws/live`;
+const CHAT_BASE_URL = `https://${HOST}/chat/text`;
 const DEFAULT_PROJECT_ID = 'praangan';
 const MAX_QUEUED_CHUNKS = 200;
 
@@ -378,6 +380,9 @@ function App() {
       ? crypto.randomUUID()
       : `chat-session-${Date.now()}`
   );
+
+  const [chatStartTime, setChatStartTime] = useState<number | null>(null);
+  const [totalLiveTime, setTotalLiveTime] = useState<string | "">("");
 
   function setTheme(theme: Theme) {
     if (theme === 'dark') {
@@ -1179,11 +1184,13 @@ function App() {
 
     switch (payload.type) {
       case 'ready':
+        endProcessingTurn();
         setLiveStatus('listening');
         setLiveStatusText('Listening for speech...');
         break;
 
       case 'listening':
+        endProcessingTurn();
         setLiveStatus('listening');
         setLiveStatusText('Listening...');
         break;
@@ -1191,6 +1198,7 @@ function App() {
       case 'processing':
         setLiveStatus('processing');
         setLiveStatusText('Processing...');
+        beginProcessingTurn();
         break;
 
       case 'transcript': {
@@ -1205,6 +1213,7 @@ function App() {
       }
 
       case 'reply_start': {
+        endProcessingTurn();
         livePcmAccumulatorRef.current = [];
         const assistantId = `assistant-live-${Date.now()}`;
         livePendingAssistantIdRef.current = assistantId;
@@ -1254,6 +1263,7 @@ function App() {
       }
 
       case 'interrupted':
+        endProcessingTurn();
         stopLiveCurrentAudio();
         setLiveStatus('listening');
         setLiveStatusText('Listening...');
@@ -1284,6 +1294,7 @@ function App() {
     const socket = new WebSocket(url);
     socket.binaryType = 'arraybuffer';
 
+    setChatStartTime(Date.now());
     socket.onopen = () => {
       console.log('[Live][RES] WebSocket opened');
       try {
@@ -1326,6 +1337,20 @@ function App() {
     liveWsRef.current = socket;
   };
 
+  function getFormattedDifference() {
+    const now = new Date();
+    const diffInMs = Math.abs(now.getTime() - (chatStartTime || 0));
+
+    const totalSeconds = Math.floor(diffInMs / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    // Formats as 03:45:12
+    const pad = (num) => String(num).padStart(2, '0');
+    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  }
+
   const stopLiveSession = () => {
     const socket = liveWsRef.current;
     if (socket) {
@@ -1340,6 +1365,8 @@ function App() {
     setLiveSessionActive(false);
     setLiveStatus('idle');
     setLiveStatusText('Press Start to connect');
+    setTotalLiveTime(getFormattedDifference());
+    setChatStartTime(null);
   };
 
   const resetLiveSession = () => {
@@ -1594,6 +1621,19 @@ function App() {
                   <div className="space-y-4">
                     <div className="max-h-[500px] overflow-y-auto pr-1" ref={chatScrollRef}>
                       <div className="space-y-4">
+                        {
+                          <div className={`flex justify-center`}>
+                          <div className={`max-w-[35%] rounded-[18px] px-5 py-4 text-sm leading-6 shadow-sm bg-slate-100 flex flex-col items-center`} >
+                            <p>{new Date().toLocaleTimeString([], {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                  hour12: true,
+                                })}
+                            </p>
+                          </div>
+                          </div>
+                        }
                         {liveHistory
                           .filter(message => message.text.trim().length > 0 || message.audioUrl)
                           .map(message => (
@@ -1613,6 +1653,13 @@ function App() {
                               </div>
                             </div>
                           ))}
+                        {totalLiveTime && (
+                          <div>
+                            <p className="text-xs text-slate-500">
+                              Total time: {totalLiveTime || getFormattedDifference()}
+                            </p>
+                          </div>
+                        )}
                       </div>
                     </div>
 
