@@ -1,9 +1,9 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { Theme } from './settings/types';
-import { AnalyticsDashboard } from './components/generated/AnalyticsDashboard';
-import { MessageSquare, X, Send, PhoneCall, PhoneOff, Play, Pause } from 'lucide-react';
+import { MessageSquare, X, Send, PhoneOff, Play, Pause } from 'lucide-react';
 import typingSound from './typingSound.mp3';
-const HOST = '192.168.40.20:8000';   //Live   = 50.116.14.116:8000
+import { AppRoutes } from './app/AppRoutes';
+// const HOST = '192.168.40.20:8000';   //Live   = 50.116.14.116:8000
+const HOST = '50.116.14.116:8000';
 // const HOST = 'bzqwy4e98mrtiw-8000.proxy.runpod.net';
 // const CALL_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/audio';
 // const LIVE_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/live';
@@ -273,7 +273,6 @@ type ControlMessage = {
   message?: string;
 };
 
-let theme: Theme = 'light';
 const CHAT_WELCOME_MESSAGE: AssistantMessage = {
   id: 'assistant-welcome-chat',
   sender: 'assistant',
@@ -299,11 +298,6 @@ function App() {
   const [isCallRecording, setIsCallRecording] = useState(false);
   const [isProcessingTurn, setIsProcessingTurn] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const [audioBufferCount, setAudioBufferCount] = useState(0);
-  const [audioPreview, setAudioPreview] = useState<number[]>([]);
-  const [websocketStatus, setWebsocketStatus] = useState<
-    'disconnected' | 'connecting' | 'connected' | 'error'
-  >('disconnected');
   const [isLoadingResponse, setIsLoadingResponse] = useState(false);
   const [chatHistory, setChatHistory] = useState<AssistantMessage[]>([CHAT_WELCOME_MESSAGE]);
   const [voiceHistory, setVoiceHistory] = useState<AssistantMessage[]>([VOICE_WELCOME_MESSAGE]);
@@ -314,8 +308,6 @@ function App() {
     'idle' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'error'
   >('idle');
   const [liveStatusText, setLiveStatusText] = useState('Press Start to connect');
-  const [liveTranscript, setLiveTranscript] = useState('');
-  const [liveReply, setLiveReply] = useState('');
   const [liveMicReady, setLiveMicReady] = useState(false);
   const [liveSessionActive, setLiveSessionActive] = useState(false);
 
@@ -331,8 +323,6 @@ function App() {
       : `live-${Date.now()}`
   );
   const livePcmAccumulatorRef = useRef<Uint8Array[]>([]);
-  const liveCurrentAudioRef = useRef<HTMLAudioElement | null>(null);
-
   // Streaming playback (chunk-by-chunk, no waiting for reply_end)
   const livePlaybackCtxRef = useRef<AudioContext | null>(null);
   const liveNextPlayTimeRef = useRef<number>(0);
@@ -352,9 +342,6 @@ function App() {
   const websocketRef = useRef<WebSocket | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
-  const sessionIdRef = useRef<string>('');
-  const endingCallRef = useRef(false);
-
   // Backend readiness / send queue (from previous fix)
   const backendReadyRef = useRef(false);
   const pendingChunksRef = useRef<ArrayBufferLike[]>([]);
@@ -382,15 +369,7 @@ function App() {
   );
 
   const [chatStartTime, setChatStartTime] = useState<number | null>(null);
-  const [totalLiveTime, setTotalLiveTime] = useState<string | "">("");
-
-  function setTheme(theme: Theme) {
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-  }
+  const [totalLiveTime, setTotalLiveTime] = useState<string | ''>('');
 
   // Keep a ref in sync with isProcessingTurn state so timer/audio callbacks
   // (which close over stale state otherwise) always see the current value.
@@ -436,7 +415,6 @@ function App() {
 
     backendReadyRef.current = false;
     pendingChunksRef.current = [];
-    setWebsocketStatus('disconnected');
   };
 
   const handleAudioReply = (data: ArrayBuffer) => {
@@ -578,12 +556,6 @@ function App() {
 
         pendingAudioMsgIdRef.current = agentReply ? assistantMsgId : null;
 
-        // if (endingCallRef.current) {
-        //   endingCallRef.current = false;
-        //   closeWebSocket();
-        // }
-
-        // below code is only for if assistant complete the sentense then capture another input
         if (!agentReply) {
           endProcessingTurn();
         }
@@ -592,31 +564,19 @@ function App() {
       }
 
       case 'error':
-        // uncommnt if you dont want  assistant complete the sentense then capture another input
         console.log('error', payload.message);
 
-        // endProcessingTurn();
         setCaptureError(
           typeof payload.message === 'string' ? payload.message : 'The assistant reported an error.'
         );
-        // if (endingCallRef.current) {
-        //   endingCallRef.current = false;
-        //   closeWebSocket();
-        // }
         break;
 
       case 'warning':
-        // uncommnt if you dont want  assistant complete the sentense then capture another input
         console.log('warning', payload.message);
 
-        // endProcessingTurn();
         if (typeof payload.message === 'string') {
           setCaptureError(payload.message);
         }
-        // if (endingCallRef.current) {
-        //   endingCallRef.current = false;
-        //   closeWebSocket();
-        // }
         break;
 
       case 'reset':
@@ -640,7 +600,6 @@ function App() {
       return;
     }
 
-    setWebsocketStatus('connecting');
     backendReadyRef.current = false;
     pendingChunksRef.current = [];
 
@@ -649,7 +608,6 @@ function App() {
     socket.binaryType = 'arraybuffer';
 
     socket.onopen = () => {
-      setWebsocketStatus('connected');
     };
 
     socket.onmessage = event => {
@@ -673,7 +631,6 @@ function App() {
     };
 
     socket.onerror = () => {
-      setWebsocketStatus('error');
       console.log('[WebSocket Error] Connection failed.');
       setCaptureError('WebSocket connection failed.');
     };
@@ -689,7 +646,6 @@ function App() {
       }
       backendReadyRef.current = false;
       pendingChunksRef.current = [];
-      setWebsocketStatus('disconnected');
     };
 
     websocketRef.current = socket;
@@ -753,8 +709,6 @@ function App() {
 
     const pcmBuffer = convertFloat32ToInt16PCM(inputData);
     sendAudioChunk(pcmBuffer);
-    setAudioBufferCount(count => count + 1);
-    setAudioPreview(Array.from(pcmBuffer.slice(0, 8)));
     evaluateSilence(inputData);
     if (hasSpeechRef.current) {
       utterancePcmChunksRef.current.push(pcmBuffer);
@@ -831,27 +785,9 @@ function App() {
     }
   };
 
-  // const closeAssistant = () => {
-  //   setAssistantOpen(false);
-  //   setIsCallRecording(false);
-  //   endProcessingTurn();
-  //   setCaptureError(null);
-  //   endingCallRef.current = false;
-  //   stopMicrophoneCapture();
-  // };
-
   const closeAssistant = () => {
     setAssistantOpen(false);
     setCaptureError(null);
-
-    // Only tear down the mic/socket if the user hasn't chosen to keep it open
-    // if (!keepConnectionOpen) {
-    //   setIsCallRecording(false);
-    //   endProcessingTurn();
-    //   endingCallRef.current = false;
-    //   stopMicrophoneCapture();
-    // }
-    // else: panel hides, but websocket + mic capture keep running in background
   };
 
   const forceCloseConnection = () => {
@@ -859,7 +795,6 @@ function App() {
     setIsCallRecording(false);
     endProcessingTurn();
     setCaptureError(null);
-    endingCallRef.current = false;
     stopMicrophoneCapture(); // this also calls closeWebSocket()
     setAssistantOpen(false);
   };
@@ -898,11 +833,7 @@ function App() {
       typeof crypto !== 'undefined' && crypto.randomUUID
         ? crypto.randomUUID()
         : `session-${Date.now()}`;
-    sessionIdRef.current = sessionId;
-
     setIsCallRecording(true);
-    setAudioBufferCount(0);
-    setAudioPreview([]);
     setCaptureError(null);
 
     const userMessage: AssistantMessage = {
@@ -993,8 +924,6 @@ function App() {
       setIsLoadingResponse(false);
     }
   };
-
-  setTheme(theme);
 
   const startTypingSound = () => {
     const audio = typingSoundRef.current;
@@ -1347,7 +1276,7 @@ function App() {
     const seconds = totalSeconds % 60;
 
     // Formats as 03:45:12
-    const pad = (num) => String(num).padStart(2, '0');
+    const pad = num => String(num).padStart(2, '0');
     return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
   }
 
@@ -1373,8 +1302,6 @@ function App() {
     const socket = liveWsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: 'reset' }));
-    setLiveTranscript('');
-    setLiveReply('');
     stopLiveCurrentAudio();
   };
 
@@ -1394,7 +1321,7 @@ function App() {
 
   return (
     <>
-      <AnalyticsDashboard onOpenAssistant={openAssistant} />
+      <AppRoutes onOpenAssistant={openAssistant} />
 
       <audio ref={audioPlaybackRef} className="hidden" />
       <audio ref={typingSoundRef} src={typingSound} className="hidden" />
@@ -1623,15 +1550,18 @@ function App() {
                       <div className="space-y-4">
                         {
                           <div className={`flex justify-center`}>
-                          <div className={`max-w-[35%] rounded-[18px] px-5 py-4 text-sm leading-6 shadow-sm bg-slate-100 flex flex-col items-center`} >
-                            <p>{new Date().toLocaleTimeString([], {
+                            <div
+                              className={`max-w-[35%] rounded-[18px] px-5 py-4 text-sm leading-6 shadow-sm bg-slate-100 flex flex-col items-center`}
+                            >
+                              <p>
+                                {new Date().toLocaleTimeString([], {
                                   hour: '2-digit',
                                   minute: '2-digit',
                                   second: '2-digit',
                                   hour12: true,
                                 })}
-                            </p>
-                          </div>
+                              </p>
+                            </div>
                           </div>
                         }
                         {liveHistory
