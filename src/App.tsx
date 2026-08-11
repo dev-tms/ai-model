@@ -1329,10 +1329,10 @@ function App() {
       <button
         type="button"
         onClick={() => openAssistant('chat')}
-        className="fixed bottom-6 right-6 z-50 inline-flex items-center gap-3 rounded-full bg-slate-950 px-5 py-4 text-sm font-semibold text-white shadow-2xl shadow-slate-950/20 transition hover:bg-slate-800 cursor-pointer"
+        className="fixed bottom-3 right-3 z-50 inline-flex items-center gap-3 rounded-full bg-slate-950 px-5 py-4 text-sm font-semibold text-white shadow-2xl shadow-slate-950/20 transition hover:bg-slate-800 cursor-pointer"
       >
         <MessageSquare size={18} className="cursor-pointer" />
-        Talk to AI Assistant
+        {/* Talk to AI Assistant */}
       </button>
 
       {assistantOpen && (

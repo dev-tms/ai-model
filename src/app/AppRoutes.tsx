@@ -1,7 +1,7 @@
 import { AppLayout } from './AppLayout';
 import { useAppRoute } from './useAppRoute';
 import { DashboardPage } from '../features/dashboard/DashboardPage';
-import { AgentsPage } from '../pages/AgentsPage';
+import Conversations from '../pages/Conversations';
 
 type AppRoutesProps = {
   onOpenAssistant: (mode: 'chat' | 'call') => void;
@@ -15,7 +15,7 @@ export const AppRoutes = ({ onOpenAssistant }: AppRoutesProps) => {
       case 'dashboard':
         return <DashboardPage onOpenAssistant={onOpenAssistant} />;
       case 'conversations':
-        return <AgentsPage />;
+        return <Conversations />;
       default:
         return <DashboardPage onOpenAssistant={onOpenAssistant} />;
     }
