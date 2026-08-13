@@ -2,8 +2,8 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { MessageSquare, X, Send, PhoneOff, Play, Pause } from 'lucide-react';
 import typingSound from './typingSound.mp3';
 import { AppRoutes } from './app/AppRoutes';
-// const HOST = '192.168.40.20:8000';   //Live   = 50.116.14.116:8000
-const HOST = '50.116.14.116:8000';
+const HOST = '192.168.40.20:8000';   //Live   = 50.116.14.116:8000
+// const HOST = '50.116.14.116:8000';
 // const HOST = 'bzqwy4e98mrtiw-8000.proxy.runpod.net';
 // const CALL_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/audio';
 // const LIVE_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/live';

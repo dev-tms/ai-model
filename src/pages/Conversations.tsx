@@ -29,6 +29,7 @@ type Customer = {
 type ConversationSummary = {
   session_id: string;
   language: string;
+  duration_seconds: number;
   turn_count: number;
   started_at: string;
   summary: string;
@@ -248,41 +249,41 @@ const Conversations = () => {
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
 
-  // useEffect(() => {
-  //   const controller = new AbortController();
+  useEffect(() => {
+    const controller = new AbortController();
 
-  //   const loadSummaries = async () => {
-  //     try {
-  //       setLoading(true);
-  //       setError(null);
+    const loadSummaries = async () => {
+      try {
+        setLoading(true);
+        setError(null);
 
-  //       const response = await fetch('https://192.168.40.20:8000/customers/praangan/summaries', {
-  //         signal: controller.signal,
-  //       });
+        const response = await fetch('https://192.168.40.20:8000/customers/praangan/summaries', {
+          signal: controller.signal,
+        });
 
-  //       console.log('Response status:', response);
+        console.log('Response status:', response);
 
-  //       if (!response.ok) {
-  //         throw new Error(`Failed to load summaries: ${response.status}`);
-  //       }
+        if (!response.ok) {
+          throw new Error(`Failed to load summaries: ${response.status}`);
+        }
 
-  //       const data = (await response.json()) as SummariesResponse;
-  //       console.log('data', data);
-  //       setSummaries(data.summaries ?? []);
-  //     } catch (err) {
-  //       if ((err as Error).name !== 'AbortError') {
-  //         setError((err as Error).message || 'Unable to load summaries');
-  //         setSummaries([]);
-  //       }
-  //     } finally {
-  //       setLoading(false);
-  //     }
-  //   };
+        const data = (await response.json()) as SummariesResponse;
+        console.log('data', data);
+        setSummaries(data.summaries ?? []);
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          setError((err as Error).message || 'Unable to load summaries');
+          setSummaries([]);
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  //   loadSummaries();
+    loadSummaries();
 
-  //   return () => controller.abort();
-  // }, []);
+    return () => controller.abort();
+  }, []);
 
   const summaryStats = useMemo(
     () => ({
@@ -522,7 +523,7 @@ const Conversations = () => {
                         <dt className="text-xs font-medium text-slate-500">Language</dt>
                         <dd className="mt-1 font-semibold text-slate-950">
                           {LANGUAGE_LABELS[selectedConversation.language] ??
-                            selectedConversation.language.toUpperCase()}
+                            selectedConversation?.language?.toUpperCase()}
                         </dd>
                       </div>
                       <div className="rounded-lg bg-slate-50 p-3">
@@ -653,7 +654,7 @@ const Conversations = () => {
                         className={`grid w-full gap-4 border-l-4 px-4 py-4 text-left transition hover:bg-slate-50 sm:grid-cols-[minmax(0,1fr)_180px] ${
                           isSelected
                             ? 'border-l-blue-600 bg-blue-50/60'
-                            : (LANGUAGE_ACCENT[item.language] ?? 'border-l-slate-300')
+                            : (LANGUAGE_ACCENT[item?.language] ?? 'border-l-slate-300')
                         }`}
                       >
                         <div className="flex min-w-0 gap-3">
@@ -691,7 +692,7 @@ const Conversations = () => {
                                 <span
                                   className={`h-1.5 w-1.5 rounded-full ${LANGUAGE_DOT[item.language] ?? 'bg-slate-400'}`}
                                 />
-                                {LANGUAGE_LABELS[item.language] ?? item.language.toUpperCase()}
+                                {LANGUAGE_LABELS[item?.language] ?? item.language?.toUpperCase()}
                               </span>
                               <span>{item.turn_count} turns</span>
                               <span className="font-mono">{item.session_id}</span>
@@ -852,7 +853,7 @@ const Conversations = () => {
                         <dt className="text-xs font-medium text-slate-500">Language</dt>
                         <dd className="mt-1 font-semibold text-slate-950">
                           {LANGUAGE_LABELS[selectedConversation.language] ??
-                            selectedConversation.language.toUpperCase()}
+                            selectedConversation.language?.toUpperCase()}
                         </dd>
                       </div>
                       <div className="rounded-lg bg-slate-50 p-3">
