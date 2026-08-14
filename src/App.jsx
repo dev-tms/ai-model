@@ -1,62 +1,49 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
-import { MessageSquare, X, Send, PhoneOff, Play, Pause } from 'lucide-react';
-import typingSound from './typingSound.mp3';
-import { AppRoutes } from './app/AppRoutes';
-// const HOST = '192.168.40.20:8000';   //Live   = 50.116.14.116:8000
-const HOST = '50.116.14.116:8000';
-// const HOST = 'bzqwy4e98mrtiw-8000.proxy.runpod.net';
-// const CALL_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/audio';
-// const LIVE_WS_BASE_URL = 'wss://192.168.40.20:8000/ws/live';
-// const CHAT_BASE_URL = 'https://192.168.40.20:8000/chat/text';
+import { useEffect, useRef, useState } from "react";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { MessageSquare, X, Send, PhoneOff, Play, Pause } from "lucide-react";
+import typingSound from "./assets/typingSound.mp3";
+import { AppLayout } from "./app/AppLayout";
+import { DashboardPage } from "./features/dashboard/DashboardPage";
+import Conversations from "./pages/Conversations";
+import ConversationDetail from "./pages/ConversationDetail";
+// const HOST = "50.116.14.116:8000";
+const HOST = "192.168.40.20:8000";
 const CALL_WS_BASE_URL = `wss://${HOST}/ws/audio`;
 const LIVE_WS_BASE_URL = `wss://${HOST}/ws/live`;
 const CHAT_BASE_URL = `https://${HOST}/chat/text`;
-const DEFAULT_PROJECT_ID = 'praangan';
+const DEFAULT_PROJECT_ID = "praangan";
 const MAX_QUEUED_CHUNKS = 200;
-
-// --- Silence detection (VAD) tuning ---
-// RMS energy below this is treated as silence. Raise if background noise
-// keeps triggering false "speech"; lower if quiet speech isn't detected.
 const SILENCE_RMS_THRESHOLD = 0.012;
-// How long the user must be silent (after having spoken) before we
-// treat the utterance as finished and send it to the backend.
-const SILENCE_DURATION_MS = 2000;
-const MAX_UTTERANCE_MS = 8000; // force-finalize safety net if silence never detected
-
-const convertFloat32ToInt16PCM = (input: Float32Array): Int16Array => {
+const SILENCE_DURATION_MS = 2e3;
+const MAX_UTTERANCE_MS = 8e3;
+const convertFloat32ToInt16PCM = (input) => {
   const output = new Int16Array(input.length);
-
   for (let index = 0; index < input.length; index += 1) {
     const sample = Math.max(-1, Math.min(1, input[index]));
-    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    output[index] = sample < 0 ? sample * 32768 : sample * 32767;
   }
-
   return output;
 };
-
-const computeRms = (data: Float32Array): number => {
+const computeRms = (data) => {
   let sumSquares = 0;
   for (let i = 0; i < data.length; i += 1) {
     sumSquares += data[i] * data[i];
   }
   return Math.sqrt(sumSquares / data.length);
 };
-
-const encodeInt16PCMChunksToWav = (chunks: Int16Array[], sampleRate: number): Blob => {
+const encodeInt16PCMChunksToWav = (chunks, sampleRate) => {
   const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const buffer = new ArrayBuffer(44 + totalLength * 2);
   const view = new DataView(buffer);
-
-  const writeString = (offset: number, string: string) => {
+  const writeString = (offset, string) => {
     for (let i = 0; i < string.length; i += 1) {
       view.setUint8(offset + i, string.charCodeAt(i));
     }
   };
-
-  writeString(0, 'RIFF');
+  writeString(0, "RIFF");
   view.setUint32(4, 36 + totalLength * 2, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
   view.setUint16(22, 1, true);
@@ -64,9 +51,8 @@ const encodeInt16PCMChunksToWav = (chunks: Int16Array[], sampleRate: number): Bl
   view.setUint32(28, sampleRate * 2, true);
   view.setUint16(32, 2, true);
   view.setUint16(34, 16, true);
-  writeString(36, 'data');
+  writeString(36, "data");
   view.setUint32(40, totalLength * 2, true);
-
   let index = 44;
   for (const chunk of chunks) {
     for (let i = 0; i < chunk.length; i += 1) {
@@ -74,11 +60,9 @@ const encodeInt16PCMChunksToWav = (chunks: Int16Array[], sampleRate: number): Bl
       index += 2;
     }
   }
-
-  return new Blob([buffer], { type: 'audio/wav' });
+  return new Blob([buffer], { type: "audio/wav" });
 };
-
-const extractPcmFromWav = (wavBytes: ArrayBuffer): Uint8Array => {
+const extractPcmFromWav = (wavBytes) => {
   const view = new DataView(wavBytes);
   let offset = 12;
   while (offset < view.byteLength - 8) {
@@ -86,32 +70,29 @@ const extractPcmFromWav = (wavBytes: ArrayBuffer): Uint8Array => {
       view.getUint8(offset),
       view.getUint8(offset + 1),
       view.getUint8(offset + 2),
-      view.getUint8(offset + 3)
+      view.getUint8(offset + 3),
     );
     const chunkSize = view.getUint32(offset + 4, true);
-    if (chunkId === 'data') {
+    if (chunkId === "data") {
       return new Uint8Array(wavBytes, offset + 8, chunkSize);
     }
     offset += 8 + chunkSize;
   }
   return new Uint8Array(wavBytes);
 };
-
-const buildWavFromPcmParts = (pcmParts: Uint8Array[], sampleRate: number): ArrayBuffer => {
+const buildWavFromPcmParts = (pcmParts, sampleRate) => {
   const totalPcm = pcmParts.reduce((sum, part) => sum + part.byteLength, 0);
   const buffer = new ArrayBuffer(44 + totalPcm);
   const view = new DataView(buffer);
-
-  const writeString = (offset: number, value: string) => {
+  const writeString = (offset2, value) => {
     for (let i = 0; i < value.length; i += 1) {
-      view.setUint8(offset + i, value.charCodeAt(i));
+      view.setUint8(offset2 + i, value.charCodeAt(i));
     }
   };
-
-  writeString(0, 'RIFF');
+  writeString(0, "RIFF");
   view.setUint32(4, 36 + totalPcm, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
   view.setUint16(22, 1, true);
@@ -119,49 +100,39 @@ const buildWavFromPcmParts = (pcmParts: Uint8Array[], sampleRate: number): Array
   view.setUint32(28, sampleRate * 2, true);
   view.setUint16(32, 2, true);
   view.setUint16(34, 16, true);
-  writeString(36, 'data');
+  writeString(36, "data");
   view.setUint32(40, totalPcm, true);
-
   let offset = 44;
   for (const part of pcmParts) {
     new Uint8Array(buffer, offset, part.byteLength).set(part);
     offset += part.byteLength;
   }
-
   return buffer;
 };
-
-const pcmBytesToAudioBuffer = (
-  pcmBytes: Uint8Array,
-  sampleRate: number,
-  audioCtx: AudioContext
-): AudioBuffer => {
+const pcmBytesToAudioBuffer = (pcmBytes, sampleRate, audioCtx) => {
   const sampleCount = pcmBytes.byteLength / 2;
-  const int16View = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, sampleCount);
-
+  const int16View = new Int16Array(
+    pcmBytes.buffer,
+    pcmBytes.byteOffset,
+    sampleCount,
+  );
   const audioBuffer = audioCtx.createBuffer(1, sampleCount, sampleRate);
   const channelData = audioBuffer.getChannelData(0);
-
   for (let i = 0; i < sampleCount; i += 1) {
-    channelData[i] = int16View[i] / (int16View[i] < 0 ? 0x8000 : 0x7fff);
+    channelData[i] = int16View[i] / (int16View[i] < 0 ? 32768 : 32767);
   }
-
   return audioBuffer;
 };
-
-const decodeBase64AudioToArrayBuffer = (raw: string): ArrayBuffer | null => {
+const decodeBase64AudioToArrayBuffer = (raw) => {
   const payload = raw.trim();
   if (!payload) return null;
-
-  const normalized = payload.startsWith('data:')
-    ? payload.slice(payload.indexOf(',') + 1)
+  const normalized = payload.startsWith("data:")
+    ? payload.slice(payload.indexOf(",") + 1)
     : payload;
-
   const base64Pattern = /^[A-Za-z0-9+/=\r\n]+$/;
   if (!base64Pattern.test(normalized)) return null;
-
   try {
-    const binary = atob(normalized.replace(/\s/g, ''));
+    const binary = atob(normalized.replace(/\s/g, ""));
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) {
       bytes[i] = binary.charCodeAt(i);
@@ -171,60 +142,48 @@ const decodeBase64AudioToArrayBuffer = (raw: string): ArrayBuffer | null => {
     return null;
   }
 };
-
-type AssistantMessage = {
-  id: string;
-  sender: 'user' | 'assistant';
-  text: string;
-  audioUrl?: string;
-};
-
-const formatAudioTime = (seconds: number): string => {
-  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+const formatAudioTime = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
-
-const MessageAudioPlayer = ({ src }: { src: string }) => {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+const MessageAudioPlayer = ({ src }) => {
+  const audioRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-
   useEffect(() => {
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
   }, [src]);
-
   const syncDuration = () => {
     const nextDuration = audioRef.current?.duration;
-    if (typeof nextDuration === 'number' && Number.isFinite(nextDuration) && nextDuration > 0) {
+    if (
+      typeof nextDuration === "number" &&
+      Number.isFinite(nextDuration) &&
+      nextDuration > 0
+    ) {
       setDuration(nextDuration);
     }
   };
-
   const togglePlay = () => {
     const audio = audioRef.current;
     if (!audio) return;
-
     if (audio.paused) {
-      void audio.play().catch(() => undefined);
+      void audio.play().catch(() => void 0);
     } else {
       audio.pause();
     }
   };
-
-  const handleSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSeek = (event) => {
     const audio = audioRef.current;
     if (!audio) return;
-
     const nextTime = Number(event.target.value);
     audio.currentTime = nextTime;
     setCurrentTime(nextTime);
   };
-
   return (
     <div className="mt-2 flex w-full min-w-[280px] items-center gap-2 rounded-2xl bg-slate-100 px-3 py-2 text-slate-700">
       <audio
@@ -243,9 +202,13 @@ const MessageAudioPlayer = ({ src }: { src: string }) => {
         type="button"
         onClick={togglePlay}
         className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white text-slate-900 shadow-sm transition hover:bg-slate-50"
-        aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
+        aria-label={isPlaying ? "Pause audio" : "Play audio"}
       >
-        {isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
+        {isPlaying ? (
+          <Pause size={14} />
+        ) : (
+          <Play size={14} className="ml-0.5" />
+        )}
       </button>
       <span className="shrink-0 text-xs font-medium tabular-nums text-slate-600">
         {formatAudioTime(currentTime)} / {formatAudioTime(duration)}
@@ -262,149 +225,116 @@ const MessageAudioPlayer = ({ src }: { src: string }) => {
     </div>
   );
 };
-
-type ControlMessage = {
-  type?: string;
-  project_id?: string;
-  session_id?: string;
-  user_text?: string;
-  language?: string;
-  agent_reply?: string;
-  message?: string;
+const CHAT_WELCOME_MESSAGE = {
+  id: "assistant-welcome-chat",
+  sender: "assistant",
+  text: "Hello! I\u2019m your AI Assistant. Tap Chat to start typing or Call for voice interaction.",
 };
-
-const CHAT_WELCOME_MESSAGE: AssistantMessage = {
-  id: 'assistant-welcome-chat',
-  sender: 'assistant',
-  text: 'Hello! I’m your AI Assistant. Tap Chat to start typing or Call for voice interaction.',
+const VOICE_WELCOME_MESSAGE = {
+  id: "assistant-welcome-voice",
+  sender: "assistant",
+  text: "Hello! I\u2019m your AI Assistant. Start a voice call to speak with me.",
 };
-
-const VOICE_WELCOME_MESSAGE: AssistantMessage = {
-  id: 'assistant-welcome-voice',
-  sender: 'assistant',
-  text: 'Hello! I’m your AI Assistant. Start a voice call to speak with me.',
+const LIVE_WELCOME_MESSAGE = {
+  id: "assistant-welcome-live",
+  sender: "assistant",
+  text: "Hello! Start a live session to speak with me in real time.",
 };
-
-const LIVE_WELCOME_MESSAGE: AssistantMessage = {
-  id: 'assistant-welcome-live',
-  sender: 'assistant',
-  text: 'Hello! Start a live session to speak with me in real time.',
-};
-
 function App() {
   const [assistantOpen, setAssistantOpen] = useState(false);
-  const [assistantMode, setAssistantMode] = useState<'chat' | 'call' | 'live'>('chat');
-  const [assistantInput, setAssistantInput] = useState('');
+  const [assistantMode, setAssistantMode] = useState("chat");
+  const [assistantInput, setAssistantInput] = useState("");
   const [isCallRecording, setIsCallRecording] = useState(false);
   const [isProcessingTurn, setIsProcessingTurn] = useState(false);
-  const [captureError, setCaptureError] = useState<string | null>(null);
+  const [captureError, setCaptureError] = useState(null);
   const [isLoadingResponse, setIsLoadingResponse] = useState(false);
-  const [chatHistory, setChatHistory] = useState<AssistantMessage[]>([CHAT_WELCOME_MESSAGE]);
-  const [voiceHistory, setVoiceHistory] = useState<AssistantMessage[]>([VOICE_WELCOME_MESSAGE]);
-  const [liveHistory, setLiveHistory] = useState<AssistantMessage[]>([LIVE_WELCOME_MESSAGE]);
-
-  // --- Live Stream tab state ---
-  const [liveStatus, setLiveStatus] = useState<
-    'idle' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'error'
-  >('idle');
-  const [liveStatusText, setLiveStatusText] = useState('Press Start to connect');
+  const [chatHistory, setChatHistory] = useState([CHAT_WELCOME_MESSAGE]);
+  const [voiceHistory, setVoiceHistory] = useState([VOICE_WELCOME_MESSAGE]);
+  const [liveHistory, setLiveHistory] = useState([LIVE_WELCOME_MESSAGE]);
+  const [liveStatus, setLiveStatus] = useState("idle");
+  const [liveStatusText, setLiveStatusText] = useState(
+    "Press Start to connect",
+  );
   const [liveMicReady, setLiveMicReady] = useState(false);
   const [liveSessionActive, setLiveSessionActive] = useState(false);
-
-  const liveWsRef = useRef<WebSocket | null>(null);
-  const liveAudioCtxRef = useRef<AudioContext | null>(null);
-  const liveProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const liveMicSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const liveSilentGainRef = useRef<GainNode | null>(null);
-  const liveMicStreamRef = useRef<MediaStream | null>(null);
-  const liveSessionIdRef = useRef<string>(
-    typeof crypto !== 'undefined' && crypto.randomUUID
+  const liveWsRef = useRef(null);
+  const liveAudioCtxRef = useRef(null);
+  const liveProcessorRef = useRef(null);
+  const liveMicSourceRef = useRef(null);
+  const liveSilentGainRef = useRef(null);
+  const liveMicStreamRef = useRef(null);
+  const liveSessionIdRef = useRef(
+    typeof crypto !== "undefined" && crypto.randomUUID
       ? crypto.randomUUID().slice(0, 8)
-      : `live-${Date.now()}`
+      : `live-${Date.now()}`,
   );
-  const livePcmAccumulatorRef = useRef<Uint8Array[]>([]);
-  // Streaming playback (chunk-by-chunk, no waiting for reply_end)
-  const livePlaybackCtxRef = useRef<AudioContext | null>(null);
-  const liveNextPlayTimeRef = useRef<number>(0);
-  const liveActiveSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  const liveIsPlayingRef = useRef<boolean>(false);
-
-  const LIVE_SAMPLE_RATE = 16000; // mic capture rate (matches server input expectation)
-  const LIVE_OUTPUT_SAMPLE_RATE = 24000; // Gemini Live style TTS output rate — adjust to match your backend
+  const livePcmAccumulatorRef = useRef([]);
+  const livePlaybackCtxRef = useRef(null);
+  const liveNextPlayTimeRef = useRef(0);
+  const liveActiveSourcesRef = useRef([]);
+  const liveIsPlayingRef = useRef(false);
+  const LIVE_SAMPLE_RATE = 16e3;
+  const LIVE_OUTPUT_SAMPLE_RATE = 24e3;
   const LIVE_FRAME_SIZE = 512;
-
   const [keepConnectionOpen, setKeepConnectionOpen] = useState(false);
-  const livePendingAssistantIdRef = useRef<string | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const websocketRef = useRef<WebSocket | null>(null);
-  const chatScrollRef = useRef<HTMLDivElement | null>(null);
-  const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
-  // Backend readiness / send queue (from previous fix)
+  const livePendingAssistantIdRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const mediaStreamSourceRef = useRef(null);
+  const processorRef = useRef(null);
+  const websocketRef = useRef(null);
+  const chatScrollRef = useRef(null);
+  const audioPlaybackRef = useRef(null);
   const backendReadyRef = useRef(false);
-  const pendingChunksRef = useRef<ArrayBufferLike[]>([]);
-
-  // NEW: silence detection state
+  const pendingChunksRef = useRef([]);
   const hasSpeechRef = useRef(false);
-  const silenceTimeoutRef = useRef<number | null>(null);
+  const silenceTimeoutRef = useRef(null);
   const isProcessingTurnRef = useRef(false);
-
-  // ADD near hasSpeechRef / silenceTimeoutRef
-  const speechStartRef = useRef<number | null>(null);
-  const pendingAudioMsgIdRef = useRef<string | null>(null);
-  const pendingUserAudioUrlRef = useRef<string | null>(null);
-  const utterancePcmChunksRef = useRef<Int16Array[]>([]);
-  const typingSoundRef = useRef<HTMLAudioElement | null>(null);
-  // const activeHistory = assistantMode === 'chat' ? chatHistory : voiceHistory;
+  const speechStartRef = useRef(null);
+  const pendingAudioMsgIdRef = useRef(null);
+  const pendingUserAudioUrlRef = useRef(null);
+  const utterancePcmChunksRef = useRef([]);
+  const typingSoundRef = useRef(null);
   const activeHistory =
-    assistantMode === 'chat' ? chatHistory : assistantMode === 'call' ? voiceHistory : liveHistory;
-
-  // Add near your other refs
-  const chatSessionIdRef = useRef<string>(
-    typeof crypto !== 'undefined' && crypto.randomUUID
+    assistantMode === "chat"
+      ? chatHistory
+      : assistantMode === "call"
+        ? voiceHistory
+        : liveHistory;
+  const chatSessionIdRef = useRef(
+    typeof crypto !== "undefined" && crypto.randomUUID
       ? crypto.randomUUID()
-      : `chat-session-${Date.now()}`
+      : `chat-session-${Date.now()}`,
   );
-
-  const [chatStartTime, setChatStartTime] = useState<number | null>(null);
-  const [totalLiveTime, setTotalLiveTime] = useState<string | ''>('');
-
-  // Keep a ref in sync with isProcessingTurn state so timer/audio callbacks
-  // (which close over stale state otherwise) always see the current value.
+  const [chatStartTime, setChatStartTime] = useState(null);
+  const [totalLiveTime, setTotalLiveTime] = useState("");
   const beginProcessingTurn = () => {
     isProcessingTurnRef.current = true;
     setIsProcessingTurn(true);
     startTypingSound();
   };
-
   const endProcessingTurn = () => {
     isProcessingTurnRef.current = false;
     setIsProcessingTurn(false);
     stopTypingSound();
   };
-
   const clearSilenceTimer = () => {
     if (silenceTimeoutRef.current !== null) {
       window.clearTimeout(silenceTimeoutRef.current);
       silenceTimeoutRef.current = null;
     }
   };
-
   const flushPendingChunks = () => {
     const socket = websocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
     while (pendingChunksRef.current.length > 0) {
       const chunk = pendingChunksRef.current.shift();
       if (chunk) socket.send(chunk);
     }
   };
-
   const closeWebSocket = () => {
     if (websocketRef.current) {
-      console.trace('[closeWebSocket] called — stack trace above');
+      console.trace("[closeWebSocket] called \u2014 stack trace above");
       websocketRef.current.onopen = null;
       websocketRef.current.onmessage = null;
       websocketRef.current.onerror = null;
@@ -412,73 +342,56 @@ function App() {
       websocketRef.current.close();
       websocketRef.current = null;
     }
-
     backendReadyRef.current = false;
     pendingChunksRef.current = [];
   };
-
-  const handleAudioReply = (data: ArrayBuffer) => {
-    const blob = new Blob([data], { type: 'audio/wav' });
+  const handleAudioReply = (data) => {
+    const blob = new Blob([data], { type: "audio/wav" });
     const url = URL.createObjectURL(blob);
-
     const targetId = pendingAudioMsgIdRef.current;
     pendingAudioMsgIdRef.current = null;
-
-    setVoiceHistory(prev =>
-      prev.map(m => (targetId && m.id === targetId ? { ...m, audioUrl: url } : m))
+    setVoiceHistory((prev) =>
+      prev.map((m) =>
+        targetId && m.id === targetId ? { ...m, audioUrl: url } : m,
+      ),
     );
-
     const audioEl = audioPlaybackRef.current;
-    // if (audioEl) {
-    //   audioEl.src = url;
-    //   void audioEl.play().catch(() => undefined);
-    // }
-
-    // below code is only for if assistant complete the sentense then capture another input
     if (audioEl) {
       audioEl.src = url;
       audioEl.onended = () => {
-        endProcessingTurn(); // mic only re-enabled once the assistant is done talking
+        endProcessingTurn();
       };
       audioEl.onerror = () => {
-        endProcessingTurn(); // safety net so a playback failure doesn't lock the mic forever
+        endProcessingTurn();
       };
       void audioEl.play().catch(() => {
-        endProcessingTurn(); // if autoplay is blocked, don't leave the turn stuck
+        endProcessingTurn();
       });
     } else {
       endProcessingTurn();
     }
   };
-
-  // NEW: sends the accumulated audio for processing as soon as we detect
-  // the user has stopped talking. Does NOT close the socket — the call
-  // stays open so the next utterance can be captured immediately after.
   const finalizeTurn = () => {
     const socket = websocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     if (!hasSpeechRef.current || isProcessingTurnRef.current) return;
-
     const chunks = utterancePcmChunksRef.current;
     if (chunks.length > 0) {
-      const wavBlob = encodeInt16PCMChunksToWav(chunks, 16000);
+      const wavBlob = encodeInt16PCMChunksToWav(chunks, 16e3);
       if (pendingUserAudioUrlRef.current) {
         URL.revokeObjectURL(pendingUserAudioUrlRef.current);
       }
       pendingUserAudioUrlRef.current = URL.createObjectURL(wavBlob);
     }
     utterancePcmChunksRef.current = [];
-
     hasSpeechRef.current = false;
     speechStartRef.current = null;
     beginProcessingTurn();
-    socket.send(JSON.stringify({ type: 'final' }));
+    socket.send(JSON.stringify({ type: "final" }));
   };
-
-  const evaluateSilence = (inputData: Float32Array) => {
+  const evaluateSilence = (inputData) => {
     const rms = computeRms(inputData);
     const isSpeech = rms > SILENCE_RMS_THRESHOLD;
-
     if (isSpeech) {
       if (!hasSpeechRef.current) {
         speechStartRef.current = Date.now();
@@ -486,14 +399,15 @@ function App() {
       }
       hasSpeechRef.current = true;
       clearSilenceTimer();
-
-      if (speechStartRef.current && Date.now() - speechStartRef.current > MAX_UTTERANCE_MS) {
+      if (
+        speechStartRef.current &&
+        Date.now() - speechStartRef.current > MAX_UTTERANCE_MS
+      ) {
         speechStartRef.current = null;
         finalizeTurn();
       }
       return;
     }
-
     if (
       hasSpeechRef.current &&
       silenceTimeoutRef.current === null &&
@@ -506,137 +420,115 @@ function App() {
       }, SILENCE_DURATION_MS);
     }
   };
-
-  const handleControlMessage = (raw: string) => {
-    let payload: ControlMessage;
-    console.log('[Control Message]', raw);
+  const handleControlMessage = (raw) => {
+    let payload;
+    console.log("[Control Message]", raw);
     try {
       payload = JSON.parse(raw);
-
-      console.log('[Control Message Parsed]', payload);
+      console.log("[Control Message Parsed]", payload);
     } catch {
       return;
     }
-
     switch (payload.type) {
-      case 'ready':
+      case "ready":
         backendReadyRef.current = true;
         flushPendingChunks();
         break;
-
-      case 'response': {
-        // uncommnt if you dont want  assistant complete the sentense then capture another input
-
-        // endProcessingTurn();
-        const userText = typeof payload.user_text === 'string' ? payload.user_text.trim() : '';
+      case "response": {
+        const userText =
+          typeof payload.user_text === "string" ? payload.user_text.trim() : "";
         const agentReply =
-          typeof payload.agent_reply === 'string' ? payload.agent_reply.trim() : '';
-
-        console.log('[Assistant Response]', { userText, agentReply, language: payload.language });
+          typeof payload.agent_reply === "string"
+            ? payload.agent_reply.trim()
+            : "";
+        console.log("[Assistant Response]", {
+          userText,
+          agentReply,
+          language: payload.language,
+        });
         const assistantMsgId = `assistant-turn-${Date.now()}`;
         const userAudioUrl = pendingUserAudioUrlRef.current;
         pendingUserAudioUrlRef.current = null;
-
-        setVoiceHistory(prev => [
+        setVoiceHistory((prev) => [
           ...prev,
           ...(userText
             ? [
                 {
                   id: `user-turn-${Date.now()}`,
-                  sender: 'user' as const,
+                  sender: "user",
                   text: userText,
                   ...(userAudioUrl ? { audioUrl: userAudioUrl } : {}),
                 },
               ]
             : []),
           ...(agentReply
-            ? [{ id: assistantMsgId, sender: 'assistant' as const, text: agentReply }]
+            ? [{ id: assistantMsgId, sender: "assistant", text: agentReply }]
             : []),
         ]);
-
         pendingAudioMsgIdRef.current = agentReply ? assistantMsgId : null;
-
         if (!agentReply) {
           endProcessingTurn();
         }
-
         break;
       }
-
-      case 'error':
-        console.log('error', payload.message);
-
+      case "error":
+        console.log("error", payload.message);
         setCaptureError(
-          typeof payload.message === 'string' ? payload.message : 'The assistant reported an error.'
+          typeof payload.message === "string"
+            ? payload.message
+            : "The assistant reported an error.",
         );
         break;
-
-      case 'warning':
-        console.log('warning', payload.message);
-
-        if (typeof payload.message === 'string') {
+      case "warning":
+        console.log("warning", payload.message);
+        if (typeof payload.message === "string") {
           setCaptureError(payload.message);
         }
         break;
-
-      case 'reset':
+      case "reset":
         endProcessingTurn();
         break;
-
-      case 'processing': {
-        console.log('[Assistant Processing]', payload.message);
-        // Optional: surface a "thinking" state in the UI here, e.g.:
-        // setCaptureError(null);
+      case "processing": {
+        console.log("[Assistant Processing]", payload.message);
         break;
       }
-
       default:
         break;
     }
   };
-
-  const connectWebSocket = (sessionId: string) => {
+  const connectWebSocket = (sessionId) => {
     if (websocketRef.current?.readyState === WebSocket.OPEN) {
       return;
     }
-
     backendReadyRef.current = false;
     pendingChunksRef.current = [];
-
     const url = `${CALL_WS_BASE_URL}?project_id=${encodeURIComponent(DEFAULT_PROJECT_ID)}&session_id=${encodeURIComponent(sessionId)}`;
     const socket = new WebSocket(url);
-    socket.binaryType = 'arraybuffer';
-
-    socket.onopen = () => {
-    };
-
-    socket.onmessage = event => {
-      if (typeof event.data === 'string') {
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => {};
+    socket.onmessage = (event) => {
+      if (typeof event.data === "string") {
         const raw = event.data.trim();
-        if (raw.startsWith('{')) {
+        if (raw.startsWith("{")) {
           handleControlMessage(raw);
           return;
         }
-
         const decodedAudio = decodeBase64AudioToArrayBuffer(raw);
         if (decodedAudio) {
           handleAudioReply(decodedAudio);
           return;
         }
-
         handleControlMessage(raw);
       } else {
-        handleAudioReply(event.data as ArrayBuffer);
+        handleAudioReply(event.data);
       }
     };
-
     socket.onerror = () => {
-      console.log('[WebSocket Error] Connection failed.');
-      setCaptureError('WebSocket connection failed.');
+      console.log("[WebSocket Error] Connection failed.");
+      setCaptureError("WebSocket connection failed.");
     };
-
-    socket.onclose = event => {
-      console.log('[WebSocket] onclose fired', {
+    socket.onclose = (event) => {
+      console.log("[WebSocket] onclose fired", {
         code: event.code,
         reason: event.reason,
         wasClean: event.wasClean,
@@ -647,66 +539,53 @@ function App() {
       backendReadyRef.current = false;
       pendingChunksRef.current = [];
     };
-
     websocketRef.current = socket;
   };
-
-  // const stopMicrophoneCapture = (keepSocketOpen = false) => {
   const stopMicrophoneCapture = (keepSocketOpen = true) => {
     const processor = processorRef.current;
     if (processor) {
       processor.disconnect();
       processor.onaudioprocess = null;
     }
-
     mediaStreamSourceRef.current?.disconnect();
-
     processorRef.current = null;
     mediaStreamSourceRef.current = null;
-
-    void audioContextRef.current?.close().catch(() => undefined);
+    void audioContextRef.current?.close().catch(() => void 0);
     audioContextRef.current = null;
-
-    mediaStreamRef.current?.getTracks().forEach(track => track.stop());
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
-
     clearSilenceTimer();
     hasSpeechRef.current = false;
-
     if (!keepSocketOpen) {
       closeWebSocket();
     }
   };
-
-  const sendAudioChunk = (pcmBuffer: Int16Array) => {
+  const sendAudioChunk = (pcmBuffer) => {
     if (isProcessingTurnRef.current) {
       return;
     }
-
     const socket = websocketRef.current;
     const chunk = pcmBuffer.buffer.slice(
       pcmBuffer.byteOffset,
-      pcmBuffer.byteOffset + pcmBuffer.byteLength
+      pcmBuffer.byteOffset + pcmBuffer.byteLength,
     );
-
-    const canSendNow = !!socket && socket.readyState === WebSocket.OPEN && backendReadyRef.current;
-
+    const canSendNow =
+      !!socket &&
+      socket.readyState === WebSocket.OPEN &&
+      backendReadyRef.current;
     if (canSendNow) {
-      socket!.send(chunk);
+      socket.send(chunk);
       return;
     }
-
     pendingChunksRef.current.push(chunk);
     if (pendingChunksRef.current.length > MAX_QUEUED_CHUNKS) {
       pendingChunksRef.current.shift();
     }
   };
-
-  const handleAudioBuffer = (inputData: Float32Array) => {
+  const handleAudioBuffer = (inputData) => {
     if (isProcessingTurnRef.current) {
       return;
     }
-
     const pcmBuffer = convertFloat32ToInt16PCM(inputData);
     sendAudioChunk(pcmBuffer);
     evaluateSilence(inputData);
@@ -714,175 +593,147 @@ function App() {
       utterancePcmChunksRef.current.push(pcmBuffer);
     }
   };
-
-  const startMicrophoneCapture = async (sessionId: string) => {
-    if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      throw new Error('This browser does not support microphone capture.');
+  const startMicrophoneCapture = async (sessionId) => {
+    if (
+      typeof window === "undefined" ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
+      throw new Error("This browser does not support microphone capture.");
     }
-
     stopMicrophoneCapture();
-
-    // const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true, // removes the assistant's own TTS audio if picked up by mic (critical for barge-in/call scenarios)
-        noiseSuppression: true, // suppresses steady background noise (fans, hum, traffic)
-        autoGainControl: true, // normalizes volume so quiet speech isn't under-captured
+        echoCancellation: true,
+        // removes the assistant's own TTS audio if picked up by mic (critical for barge-in/call scenarios)
+        noiseSuppression: true,
+        // suppresses steady background noise (fans, hum, traffic)
+        autoGainControl: true,
+        // normalizes volume so quiet speech isn't under-captured
         channelCount: 1,
-        sampleRate: 16000,
+        sampleRate: 16e3,
       },
     });
-
-    const AudioContextCtor =
-      window.AudioContext ||
-      (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextCtor) {
-      throw new Error('AudioContext is not supported in this browser.');
+      throw new Error("AudioContext is not supported in this browser.");
     }
-
-    const context = new AudioContextCtor({ sampleRate: 16000 });
+    const context = new AudioContextCtor({ sampleRate: 16e3 });
     const source = context.createMediaStreamSource(stream);
     const processor = context.createScriptProcessor(4096, 1, 1);
-
     connectWebSocket(sessionId);
-
-    processor.onaudioprocess = event => {
+    processor.onaudioprocess = (event) => {
       const inputData = event.inputBuffer.getChannelData(0);
       handleAudioBuffer(inputData);
     };
-
     source.connect(processor);
     processor.connect(context.destination);
-
     audioContextRef.current = context;
     mediaStreamRef.current = stream;
     mediaStreamSourceRef.current = source;
     processorRef.current = processor;
-
     await context.resume();
   };
-
   useEffect(() => {
     return () => {
       stopMicrophoneCapture();
     };
   }, []);
-
   useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [activeHistory, isLoadingResponse]);
-
-  const openAssistant = (mode: 'chat' | 'call' = 'chat') => {
+  const openAssistant = (mode = "chat") => {
     setAssistantMode(mode);
     setAssistantOpen(true);
-    if (mode !== 'call') {
+    if (mode !== "call") {
       setIsCallRecording(false);
     }
   };
-
   const closeAssistant = () => {
     setAssistantOpen(false);
     setCaptureError(null);
   };
-
   const forceCloseConnection = () => {
     setKeepConnectionOpen(false);
     setIsCallRecording(false);
     endProcessingTurn();
     setCaptureError(null);
-    stopMicrophoneCapture(); // this also calls closeWebSocket()
+    stopMicrophoneCapture();
     setAssistantOpen(false);
   };
-
   const endVoiceCall = () => {
     const socket = websocketRef.current;
-    const canFlushFinalTurn = hasSpeechRef.current && socket?.readyState === WebSocket.OPEN;
-
+    const canFlushFinalTurn =
+      hasSpeechRef.current && socket?.readyState === WebSocket.OPEN;
     setIsCallRecording(false);
     setCaptureError(null);
-
-    stopMicrophoneCapture(true); // keep socket open always
-
-    const endMessage: AssistantMessage = {
+    stopMicrophoneCapture(true);
+    const endMessage = {
       id: `user-voice-end-${Date.now()}`,
-      sender: 'user',
-      text: '🛑 Ended the voice call.',
+      sender: "user",
+      text: "\u{1F6D1} Ended the voice call.",
     };
-    setVoiceHistory(prev => [...prev, endMessage]);
-
+    setVoiceHistory((prev) => [...prev, endMessage]);
     if (canFlushFinalTurn && socket) {
       beginProcessingTurn();
-      socket.send(JSON.stringify({ type: 'final' })); // flush last utterance, socket stays open
+      socket.send(JSON.stringify({ type: "final" }));
     } else {
       endProcessingTurn();
     }
   };
-
   const handleVoiceCallToggle = async () => {
     if (isCallRecording) {
       endVoiceCall();
       return;
     }
-
     const sessionId =
-      typeof crypto !== 'undefined' && crypto.randomUUID
+      typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
         : `session-${Date.now()}`;
     setIsCallRecording(true);
     setCaptureError(null);
-
-    const userMessage: AssistantMessage = {
+    const userMessage = {
       id: `user-voice-${Date.now()}`,
-      sender: 'user',
-      text: '🔊 Started a voice session.',
+      sender: "user",
+      text: "\u{1F50A} Started a voice session.",
     };
-
-    setVoiceHistory(prev => [...prev, userMessage]);
-
-    const reply: AssistantMessage = {
+    setVoiceHistory((prev) => [...prev, userMessage]);
+    const reply = {
       id: `assistant-voice-${Date.now()}`,
-      sender: 'assistant',
-      text: "Voice call mode is ready. Just speak — I'll reply automatically each time you pause.",
+      sender: "assistant",
+      text: "Voice call mode is ready. Just speak \u2014 I'll reply automatically each time you pause.",
     };
-
-    setVoiceHistory(prev => [...prev, reply]);
-
+    setVoiceHistory((prev) => [...prev, reply]);
     try {
       await startMicrophoneCapture(sessionId);
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Unable to start microphone capture.';
+        error instanceof Error
+          ? error.message
+          : "Unable to start microphone capture.";
       setCaptureError(message);
       setIsCallRecording(false);
       stopMicrophoneCapture();
     }
   };
-
-  const handleAssistantSend = async (event: FormEvent<HTMLFormElement>) => {
+  const handleAssistantSend = async (event) => {
     event.preventDefault();
     const trimmed = assistantInput.trim();
     if (!trimmed) return;
-
-    const userMessage: AssistantMessage = {
+    const userMessage = {
       id: `user-${Date.now()}`,
-      sender: 'user',
+      sender: "user",
       text: trimmed,
     };
-
-    setChatHistory(prev => [...prev, userMessage]);
-    setAssistantInput('');
+    setChatHistory((prev) => [...prev, userMessage]);
+    setAssistantInput("");
     setIsLoadingResponse(true);
-
     try {
       const response = await fetch(`${CHAT_BASE_URL}`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           text: trimmed,
@@ -890,61 +741,51 @@ function App() {
           project_id: DEFAULT_PROJECT_ID,
         }),
       });
-
       if (!response.ok) {
         throw new Error(`Request failed with status ${response.status}`);
       }
-
       const data = await response.json();
       const replyText =
-        typeof data?.reply === 'string'
+        typeof data?.reply === "string"
           ? data.reply
-          : typeof data?.agent_reply === 'string'
+          : typeof data?.agent_reply === "string"
             ? data.agent_reply
-            : 'The assistant returned an empty response.';
-
-      const reply: AssistantMessage = {
+            : "The assistant returned an empty response.";
+      const reply = {
         id: `assistant-${Date.now()}`,
-        sender: 'assistant',
+        sender: "assistant",
         text: replyText,
       };
-
-      setChatHistory(prev => [...prev, reply]);
+      setChatHistory((prev) => [...prev, reply]);
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : 'Unable to reach the assistant service.';
-      const reply: AssistantMessage = {
+        error instanceof Error
+          ? error.message
+          : "Unable to reach the assistant service.";
+      const reply = {
         id: `assistant-error-${Date.now()}`,
-        sender: 'assistant',
-        text: `Sorry, I couldn’t reach the assistant service. ${errorMessage}`,
+        sender: "assistant",
+        text: `Sorry, I couldn\u2019t reach the assistant service. ${errorMessage}`,
       };
-
-      setChatHistory(prev => [...prev, reply]);
+      setChatHistory((prev) => [...prev, reply]);
     } finally {
       setIsLoadingResponse(false);
     }
   };
-
   const startTypingSound = () => {
     const audio = typingSoundRef.current;
-
     if (audio) {
       audio.currentTime = 0;
-      audio.play().catch(() => undefined);
+      audio.play().catch(() => void 0);
     }
   };
-
   const stopTypingSound = () => {
     const audio = typingSoundRef.current;
-
     if (audio) {
       audio.pause();
       audio.currentTime = 0;
     }
   };
-
-  // Live tab
-
   const acquireLiveMic = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -959,125 +800,115 @@ function App() {
       });
       liveMicStreamRef.current = stream;
       setLiveMicReady(true);
-      setLiveStatus('idle');
-      setLiveStatusText('Press Start to connect');
+      setLiveStatus("idle");
+      setLiveStatusText("Press Start to connect");
     } catch (error) {
       setLiveMicReady(false);
-      setLiveStatus('error');
-      const message = error instanceof Error ? error.message : 'Microphone access denied.';
+      setLiveStatus("error");
+      const message =
+        error instanceof Error ? error.message : "Microphone access denied.";
       setLiveStatusText(message);
     }
   };
-
   const attachLiveAudioProcessing = () => {
     const stream = liveMicStreamRef.current;
-    if (!stream) throw new Error('No microphone stream available.');
-
-    const AudioContextCtor =
-      window.AudioContext ||
-      (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-    if (!AudioContextCtor) throw new Error('AudioContext is not supported in this browser.');
-
+    if (!stream) throw new Error("No microphone stream available.");
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor)
+      throw new Error("AudioContext is not supported in this browser.");
     const audioCtx = new AudioContextCtor({ sampleRate: LIVE_SAMPLE_RATE });
     const micSource = audioCtx.createMediaStreamSource(stream);
-
     const silentGain = audioCtx.createGain();
     silentGain.gain.value = 0;
     silentGain.connect(audioCtx.destination);
-
     const processor = audioCtx.createScriptProcessor(LIVE_FRAME_SIZE, 1, 1);
-
-    processor.onaudioprocess = event => {
+    processor.onaudioprocess = (event) => {
       const socket = liveWsRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
       const inputData = event.inputBuffer.getChannelData(0);
       const pcm = new Int16Array(inputData.length);
       for (let i = 0; i < inputData.length; i += 1) {
         const sample = Math.max(-1, Math.min(1, inputData[i]));
-        pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+        pcm[i] = sample < 0 ? sample * 32768 : sample * 32767;
       }
-      console.log('[Live][REQ] audio chunk sent →', pcm.buffer.byteLength, 'bytes');
+      console.log(
+        "[Live][REQ] audio chunk sent \u2192",
+        pcm.buffer.byteLength,
+        "bytes",
+      );
       socket.send(pcm.buffer);
     };
-
     micSource.connect(processor);
     processor.connect(silentGain);
-
     liveAudioCtxRef.current = audioCtx;
     liveMicSourceRef.current = micSource;
     liveSilentGainRef.current = silentGain;
     liveProcessorRef.current = processor;
   };
-
   const detachLiveAudioProcessing = () => {
     liveProcessorRef.current?.disconnect();
     liveMicSourceRef.current?.disconnect();
     liveSilentGainRef.current?.disconnect();
-    void liveAudioCtxRef.current?.close().catch(() => undefined);
-
+    void liveAudioCtxRef.current?.close().catch(() => void 0);
     liveProcessorRef.current = null;
     liveMicSourceRef.current = null;
     liveSilentGainRef.current = null;
     liveAudioCtxRef.current = null;
   };
-
-  const ensureLivePlaybackContext = (): AudioContext => {
-    if (!livePlaybackCtxRef.current || livePlaybackCtxRef.current.state === 'closed') {
-      const AudioContextCtor =
-        window.AudioContext ||
-        (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext;
-      livePlaybackCtxRef.current = new AudioContextCtor({ sampleRate: LIVE_OUTPUT_SAMPLE_RATE });
+  const ensureLivePlaybackContext = () => {
+    if (
+      !livePlaybackCtxRef.current ||
+      livePlaybackCtxRef.current.state === "closed"
+    ) {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      livePlaybackCtxRef.current = new AudioContextCtor({
+        sampleRate: LIVE_OUTPUT_SAMPLE_RATE,
+      });
       liveNextPlayTimeRef.current = 0;
     }
     return livePlaybackCtxRef.current;
   };
-
-  const scheduleLiveAudioChunk = (pcmBytes: Uint8Array) => {
+  const scheduleLiveAudioChunk = (pcmBytes) => {
     if (pcmBytes.byteLength === 0) return;
-
     const audioCtx = ensureLivePlaybackContext();
-    const audioBuffer = pcmBytesToAudioBuffer(pcmBytes, LIVE_OUTPUT_SAMPLE_RATE, audioCtx);
-
+    const audioBuffer = pcmBytesToAudioBuffer(
+      pcmBytes,
+      LIVE_OUTPUT_SAMPLE_RATE,
+      audioCtx,
+    );
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(audioCtx.destination);
-
     const now = audioCtx.currentTime;
     const startAt = Math.max(liveNextPlayTimeRef.current, now);
     source.start(startAt);
     liveNextPlayTimeRef.current = startAt + audioBuffer.duration;
-
     liveActiveSourcesRef.current.push(source);
     source.onended = () => {
-      liveActiveSourcesRef.current = liveActiveSourcesRef.current.filter(s => s !== source);
+      liveActiveSourcesRef.current = liveActiveSourcesRef.current.filter(
+        (s) => s !== source,
+      );
       if (
         liveActiveSourcesRef.current.length === 0 &&
         audioCtx.currentTime >= liveNextPlayTimeRef.current - 0.02
       ) {
         liveIsPlayingRef.current = false;
-        setLiveStatus('listening');
-        setLiveStatusText('Listening for speech...');
+        setLiveStatus("listening");
+        setLiveStatusText("Listening for speech...");
       }
     };
-
     if (!liveIsPlayingRef.current) {
       liveIsPlayingRef.current = true;
-      setLiveStatus('speaking');
-      setLiveStatusText('Agent speaking...');
+      setLiveStatus("speaking");
+      setLiveStatusText("Agent speaking...");
     }
   };
-
   const stopLiveCurrentAudio = () => {
-    liveActiveSourcesRef.current.forEach(source => {
+    liveActiveSourcesRef.current.forEach((source) => {
       try {
         source.onended = null;
         source.stop();
-      } catch {
-        // already stopped
-      }
+      } catch {}
     });
     liveActiveSourcesRef.current = [];
     liveIsPlayingRef.current = false;
@@ -1086,123 +917,111 @@ function App() {
     }
     livePcmAccumulatorRef.current = [];
   };
-
-  const handleLiveBinaryMessage = (data: ArrayBuffer) => {
+  const handleLiveBinaryMessage = (data) => {
     const pcm = extractPcmFromWav(data);
-    scheduleLiveAudioChunk(pcm); // plays immediately, streamed
-    livePcmAccumulatorRef.current.push(pcm); // kept only for optional post-hoc replay
+    scheduleLiveAudioChunk(pcm);
+    livePcmAccumulatorRef.current.push(pcm);
   };
-
-  type LiveControlMessage = {
-    type?: string;
-    project_id?: string;
-    session_id?: string;
-    text?: string;
-    full_text?: string;
-    message?: string;
-    timings?: Record<string, number>;
-  };
-
-  const handleLiveControlMessage = (raw: string) => {
-    let payload: LiveControlMessage;
+  const handleLiveControlMessage = (raw) => {
+    let payload;
     try {
       payload = JSON.parse(raw);
     } catch {
       return;
     }
-
     switch (payload.type) {
-      case 'ready':
+      case "ready":
         endProcessingTurn();
-        setLiveStatus('listening');
-        setLiveStatusText('Listening for speech...');
+        setLiveStatus("listening");
+        setLiveStatusText("Listening for speech...");
         break;
-
-      case 'listening':
+      case "listening":
         endProcessingTurn();
-        setLiveStatus('listening');
-        setLiveStatusText('Listening...');
+        setLiveStatus("listening");
+        setLiveStatusText("Listening...");
         break;
-
-      case 'processing':
-        setLiveStatus('processing');
-        setLiveStatusText('Processing...');
+      case "processing":
+        setLiveStatus("processing");
+        setLiveStatusText("Processing...");
         beginProcessingTurn();
         break;
-
-      case 'transcript': {
+      case "transcript": {
         const text = payload.text?.trim();
         if (text) {
-          setLiveHistory(prev => [
+          setLiveHistory((prev) => [
             ...prev,
-            { id: `user-live-${Date.now()}`, sender: 'user', text },
+            { id: `user-live-${Date.now()}`, sender: "user", text },
           ]);
         }
         break;
       }
-
-      case 'reply_start': {
+      case "reply_start": {
         endProcessingTurn();
         livePcmAccumulatorRef.current = [];
         const assistantId = `assistant-live-${Date.now()}`;
         livePendingAssistantIdRef.current = assistantId;
-
-        // Only create the bubble now if we already have text; otherwise wait
-        // for reply_text to create it, so no empty bubble ever shows.
         if (payload.text?.trim()) {
-          setLiveHistory(prev => [
+          setLiveHistory((prev) => [
             ...prev,
-            { id: assistantId, sender: 'assistant', text: payload.text ?? '' },
+            { id: assistantId, sender: "assistant", text: payload.text ?? "" },
           ]);
         }
-
-        setLiveStatus('speaking');
-        setLiveStatusText('Agent speaking...');
+        setLiveStatus("speaking");
+        setLiveStatusText("Agent speaking...");
         break;
       }
-
-      case 'reply_text': {
+      case "reply_text": {
         const assistantId = livePendingAssistantIdRef.current;
-        const chunk = payload.text ?? '';
+        const chunk = payload.text ?? "";
         if (assistantId && chunk) {
-          setLiveHistory(prev => {
-            const exists = prev.some(m => m.id === assistantId);
+          setLiveHistory((prev) => {
+            const exists = prev.some((m) => m.id === assistantId);
             if (exists) {
-              return prev.map(m => (m.id === assistantId ? { ...m, text: m.text + chunk } : m));
+              return prev.map((m) =>
+                m.id === assistantId ? { ...m, text: m.text + chunk } : m,
+              );
             }
-            return [...prev, { id: assistantId, sender: 'assistant', text: chunk }];
+            return [
+              ...prev,
+              { id: assistantId, sender: "assistant", text: chunk },
+            ];
           });
         }
         break;
       }
-
-      case 'reply_end': {
+      case "reply_end": {
         const parts = livePcmAccumulatorRef.current;
         livePcmAccumulatorRef.current = [];
         const assistantId = livePendingAssistantIdRef.current;
         livePendingAssistantIdRef.current = null;
         if (assistantId && parts.length > 0) {
-          const wavBuffer = buildWavFromPcmParts(parts, LIVE_OUTPUT_SAMPLE_RATE);
-          const url = URL.createObjectURL(new Blob([wavBuffer], { type: 'audio/wav' }));
-          setLiveHistory(prev =>
-            prev.map(m => (m.id === assistantId ? { ...m, audioUrl: url } : m))
+          const wavBuffer = buildWavFromPcmParts(
+            parts,
+            LIVE_OUTPUT_SAMPLE_RATE,
+          );
+          const url = URL.createObjectURL(
+            new Blob([wavBuffer], { type: "audio/wav" }),
+          );
+          setLiveHistory((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, audioUrl: url } : m,
+            ),
           );
         }
         break;
       }
-
-      case 'interrupted':
+      case "interrupted":
         endProcessingTurn();
         stopLiveCurrentAudio();
-        setLiveStatus('listening');
-        setLiveStatusText('Listening...');
+        setLiveStatus("listening");
+        setLiveStatusText("Listening...");
         break;
-
-      case 'error':
-        setLiveStatus('error');
-        setLiveStatusText(payload.message ?? 'The assistant reported an error.');
+      case "error":
+        setLiveStatus("error");
+        setLiveStatusText(
+          payload.message ?? "The assistant reported an error.",
+        );
         break;
-
       default:
         break;
     }
@@ -1212,131 +1031,137 @@ function App() {
       void acquireLiveMic();
       return;
     }
-
     const url = `${LIVE_WS_BASE_URL}?project_id=${encodeURIComponent(
-      DEFAULT_PROJECT_ID
+      DEFAULT_PROJECT_ID,
     )}&session_id=${encodeURIComponent(liveSessionIdRef.current)}`;
-    console.log('[Live][REQ] connecting →', url);
-    setLiveStatus('connecting');
-    setLiveStatusText('Connecting...');
-
+    console.log("[Live][REQ] connecting \u2192", url);
+    setLiveStatus("connecting");
+    setLiveStatusText("Connecting...");
     const socket = new WebSocket(url);
-    socket.binaryType = 'arraybuffer';
-
+    socket.binaryType = "arraybuffer";
     setChatStartTime(Date.now());
     socket.onopen = () => {
-      console.log('[Live][RES] WebSocket opened');
+      console.log("[Live][RES] WebSocket opened");
       try {
         attachLiveAudioProcessing();
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to start audio.';
-        setLiveStatus('error');
+        const message =
+          error instanceof Error ? error.message : "Failed to start audio.";
+        setLiveStatus("error");
         setLiveStatusText(message);
         socket.close();
         return;
       }
       setLiveSessionActive(true);
-      setLiveStatus('listening');
-      setLiveStatusText('Listening for speech...');
+      setLiveStatus("listening");
+      setLiveStatusText("Listening for speech...");
     };
-
-    socket.onmessage = event => {
+    socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        console.log('[Live][RES] binary message received →', event.data.byteLength, 'bytes');
+        console.log(
+          "[Live][RES] binary message received \u2192",
+          event.data.byteLength,
+          "bytes",
+        );
         handleLiveBinaryMessage(event.data);
         return;
       }
-      console.log('[Live][RES] control message ←', event.data);
-      handleLiveControlMessage(event.data as string);
+      console.log("[Live][RES] control message \u2190", event.data);
+      handleLiveControlMessage(event.data);
     };
-
     socket.onerror = () => {
-      setLiveStatus('error');
-      setLiveStatusText('Connection error');
+      setLiveStatus("error");
+      setLiveStatusText("Connection error");
     };
-
     socket.onclose = () => {
       detachLiveAudioProcessing();
       setLiveSessionActive(false);
-      setLiveStatus('idle');
-      setLiveStatusText('Disconnected — press Start');
+      setLiveStatus("idle");
+      setLiveStatusText("Disconnected \u2014 press Start");
       liveWsRef.current = null;
     };
-
     liveWsRef.current = socket;
   };
-
   function getFormattedDifference() {
-    const now = new Date();
+    const now = /* @__PURE__ */ new Date();
     const diffInMs = Math.abs(now.getTime() - (chatStartTime || 0));
-
-    const totalSeconds = Math.floor(diffInMs / 1000);
+    const totalSeconds = Math.floor(diffInMs / 1e3);
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
-
-    // Formats as 03:45:12
-    const pad = num => String(num).padStart(2, '0');
+    const pad = (num) => String(num).padStart(2, "0");
     return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
   }
-
   const stopLiveSession = () => {
     const socket = liveWsRef.current;
     if (socket) {
       socket.onclose = null;
-      socket.close(1000, 'User stopped session');
+      socket.close(1e3, "User stopped session");
       liveWsRef.current = null;
     }
     detachLiveAudioProcessing();
     stopLiveCurrentAudio();
-    void livePlaybackCtxRef.current?.close().catch(() => undefined);
+    void livePlaybackCtxRef.current?.close().catch(() => void 0);
     livePlaybackCtxRef.current = null;
     setLiveSessionActive(false);
-    setLiveStatus('idle');
-    setLiveStatusText('Press Start to connect');
+    setLiveStatus("idle");
+    setLiveStatusText("Press Start to connect");
     setTotalLiveTime(getFormattedDifference());
     setChatStartTime(null);
   };
-
   const resetLiveSession = () => {
     const socket = liveWsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify({ type: 'reset' }));
+    socket.send(JSON.stringify({ type: "reset" }));
     stopLiveCurrentAudio();
   };
-
   useEffect(() => {
-    if (assistantMode === 'live' && !liveMicStreamRef.current) {
+    if (assistantMode === "live" && !liveMicStreamRef.current) {
       void acquireLiveMic();
     }
   }, [assistantMode]);
-
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopLiveSession();
-      liveMicStreamRef.current?.getTracks().forEach(track => track.stop());
+      liveMicStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
-
   return (
     <>
-      <AppRoutes onOpenAssistant={openAssistant} />
+      <BrowserRouter>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route
+              path="/"
+              element={<DashboardPage onOpenAssistant={openAssistant} />}
+            />
+            <Route path="/conversations" element={<Conversations />} />
+            <Route
+              path="/customers/:project_id/conversation/:session_id"
+              element={<ConversationDetail />}
+            />
+            <Route
+              path="*"
+              element={<DashboardPage onOpenAssistant={openAssistant} />}
+            />
+          </Route>
+        </Routes>
+      </BrowserRouter>
 
       <audio ref={audioPlaybackRef} className="hidden" />
       <audio ref={typingSoundRef} src={typingSound} className="hidden" />
 
       <button
         type="button"
-        onClick={() => openAssistant('chat')}
-        className="fixed bottom-3 right-3 z-50 inline-flex items-center gap-3 rounded-full bg-slate-950 px-5 py-4 text-sm font-semibold text-white shadow-2xl shadow-slate-950/20 transition hover:bg-slate-800 cursor-pointer"
+        onClick={() => openAssistant("chat")}
+        className="fixed bottom-5 right-5 z-[60] inline-flex h-14 w-14 items-center justify-center rounded-full bg-slate-950 text-white shadow-2xl shadow-slate-950/30 transition hover:bg-slate-800"
       >
         <MessageSquare size={18} className="cursor-pointer" />
         {/* Talk to AI Assistant */}
       </button>
 
       {assistantOpen && (
-        <div className="fixed inset-0 z-50 flex items-end justify-end bg-slate-950/30 backdrop-blur-sm px-4 py-6 sm:items-center sm:px-6">
+        <div className="fixed inset-0 z-[70] flex items-end justify-end bg-slate-950/30 backdrop-blur-sm px-4 py-6 sm:items-center sm:px-6">
           <div className="w-full max-w-xl overflow-hidden rounded-[32px] bg-white shadow-2xl sm:h-[90vh]">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
               <div>
@@ -1358,22 +1183,22 @@ function App() {
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => setAssistantMode('chat')}
-                  className={` cursor-pointer rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === 'chat' ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  onClick={() => setAssistantMode("chat")}
+                  className={` cursor-pointer rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === "chat" ? "bg-slate-950 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
                 >
                   Chat with AI
                 </button>
                 <button
                   type="button"
-                  onClick={() => setAssistantMode('call')}
-                  className={`cursor-pointer rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === 'call' ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  onClick={() => setAssistantMode("call")}
+                  className={`cursor-pointer rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === "call" ? "bg-slate-950 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
                 >
                   Voice Call with AI
                 </button>
                 <button
                   type="button"
-                  onClick={() => setAssistantMode('live')}
-                  className={`cursor-pointer rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === 'live' ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  onClick={() => setAssistantMode("live")}
+                  className={`cursor-pointer rounded-full px-4 py-2 text-sm font-semibold transition ${assistantMode === "live" ? "bg-slate-950 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
                 >
                   Live Stream
                 </button>
@@ -1381,24 +1206,25 @@ function App() {
             </div>
 
             <div className="flex h-[calc(100%-212px)] flex-col overflow-hidden bg-slate-50 px-6 py-6 sm:h-[calc(100%-150px)]">
-              {assistantMode === 'chat' && (
+              {assistantMode === "chat" && (
                 <div className="flex h-full flex-col">
-                  <div className="flex-1 overflow-y-auto pr-1" ref={chatScrollRef}>
+                  <div
+                    className="flex-1 overflow-y-auto pr-1"
+                    ref={chatScrollRef}
+                  >
                     <div className="space-y-4">
-                      {chatHistory.map(message => (
+                      {chatHistory.map((message) => (
                         <div
                           key={message.id}
-                          className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                          className={`flex ${message.sender === "user" ? "justify-end" : "justify-start"}`}
                         >
                           <div
-                            className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${
-                              message.sender === 'user'
-                                ? 'bg-slate-950 text-white rounded-br-none'
-                                : 'bg-white text-slate-900 rounded-bl-none border border-slate-200'
-                            }`}
+                            className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${message.sender === "user" ? "bg-slate-950 text-white rounded-br-none" : "bg-white text-slate-900 rounded-bl-none border border-slate-200"}`}
                           >
                             <p>{message.text}</p>
-                            {message.audioUrl && <MessageAudioPlayer src={message.audioUrl} />}
+                            {message.audioUrl && (
+                              <MessageAudioPlayer src={message.audioUrl} />
+                            )}
                           </div>
                         </div>
                       ))}
@@ -1408,15 +1234,15 @@ function App() {
                             <div className="flex items-center gap-1.5">
                               <span
                                 className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-bounce"
-                                style={{ animationDelay: '0ms' }}
+                                style={{ animationDelay: "0ms" }}
                               />
                               <span
                                 className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-bounce"
-                                style={{ animationDelay: '150ms' }}
+                                style={{ animationDelay: "150ms" }}
                               />
                               <span
                                 className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-bounce"
-                                style={{ animationDelay: '300ms' }}
+                                style={{ animationDelay: "300ms" }}
                               />
                             </div>
                           </div>
@@ -1431,7 +1257,9 @@ function App() {
                     <input
                       type="text"
                       value={assistantInput}
-                      onChange={event => setAssistantInput(event.target.value)}
+                      onChange={(event) =>
+                        setAssistantInput(event.target.value)
+                      }
                       placeholder="Ask your AI Assistant anything..."
                       className="min-w-0 flex-1 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                     />
@@ -1447,41 +1275,46 @@ function App() {
                 </div>
               )}
 
-              {assistantMode === 'call' && (
+              {assistantMode === "call" && (
                 <div className="flex h-full flex-col justify-between gap-6 overflow-y-auto">
                   <div className="space-y-4">
-                    <div className="max-h-[500px] overflow-y-auto pr-1" ref={chatScrollRef}>
+                    <div
+                      className="max-h-[500px] overflow-y-auto pr-1"
+                      ref={chatScrollRef}
+                    >
                       <div className="space-y-4">
-                        {voiceHistory.map(message => (
+                        {voiceHistory.map((message) => (
                           <div
                             key={message.id}
-                            className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                            className={`flex ${message.sender === "user" ? "justify-end" : "justify-start"}`}
                           >
                             <div
-                              className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${
-                                message.sender === 'user'
-                                  ? 'bg-slate-950 text-white rounded-br-none'
-                                  : 'bg-white text-slate-900 rounded-bl-none border border-slate-200'
-                              }`}
+                              className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${message.sender === "user" ? "bg-slate-950 text-white rounded-br-none" : "bg-white text-slate-900 rounded-bl-none border border-slate-200"}`}
                             >
                               <p>{message.text}</p>
-                              {message.audioUrl && <MessageAudioPlayer src={message.audioUrl} />}
+                              {message.audioUrl && (
+                                <MessageAudioPlayer src={message.audioUrl} />
+                              )}
                             </div>
                           </div>
                         ))}
                       </div>
                     </div>
                     <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
-                      <p className="font-semibold text-slate-900">Current status</p>
+                      <p className="font-semibold text-slate-900">
+                        Current status
+                      </p>
                       <p className="mt-2 text-sm text-slate-600">
                         {isProcessingTurn
-                          ? 'Processing your Question...'
+                          ? "Processing your Question..."
                           : isCallRecording
-                            ? 'Ask anything about Praangan Elitus'
-                            : 'Tap the button below to start your voice interaction.'}
+                            ? "Ask anything about Praangan Elitus"
+                            : "Tap the button below to start your voice interaction."}
                       </p>
                       {captureError && (
-                        <p className="mt-3 text-sm font-medium text-red-600">{captureError}</p>
+                        <p className="mt-3 text-sm font-medium text-red-600">
+                          {captureError}
+                        </p>
                       )}
                     </div>
                   </div>
@@ -1492,16 +1325,12 @@ function App() {
                         void handleVoiceCallToggle();
                       }}
                       disabled={isProcessingTurn}
-                      className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-3 rounded-full px-5 py-4 text-sm font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                        isCallRecording
-                          ? 'bg-red-600 hover:bg-red-700'
-                          : 'bg-slate-950 hover:bg-slate-800'
-                      }`}
+                      className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-3 rounded-full px-5 py-4 text-sm font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60 ${isCallRecording ? "bg-red-600 hover:bg-red-700" : "bg-slate-950 hover:bg-slate-800"}`}
                     >
                       {isCallRecording && (
-                        <div className="h-5 w-5 animate-spin rounded-full border-4 border-gray-200 border-t-red-500"></div>
+                        <div className="h-5 w-5 animate-spin rounded-full border-4 border-gray-200 border-t-red-500" />
                       )}
-                      {isCallRecording ? 'Thinking...' : 'Start Voice Call'}
+                      {isCallRecording ? "Thinking..." : "Start Voice Call"}
                     </button>
                     {isCallRecording && (
                       <button
@@ -1511,22 +1340,20 @@ function App() {
                         className="flex-1 min-w-[180px] inline-flex items-center justify-center gap-2 rounded-full border border-slate-300 bg-white px-5 py-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <PhoneOff size={18} />
-                        {isProcessingTurn ? 'Finishing up...' : 'End Voice Call'}
+                        {isProcessingTurn
+                          ? "Finishing up..."
+                          : "End Voice Call"}
                       </button>
                     )}
 
                     <button
                       type="button"
-                      onClick={() => setKeepConnectionOpen(prev => !prev)}
-                      className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-2 rounded-full border px-5 py-4 text-sm font-semibold shadow-sm transition ${
-                        keepConnectionOpen
-                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                          : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
-                      }`}
+                      onClick={() => setKeepConnectionOpen((prev) => !prev)}
+                      className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-2 rounded-full border px-5 py-4 text-sm font-semibold shadow-sm transition ${keepConnectionOpen ? "border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"}`}
                     >
                       {keepConnectionOpen
-                        ? '🔒 Connection stays open on close'
-                        : '🔓 Connection closes on panel close'}
+                        ? "\u{1F512} Connection stays open on close"
+                        : "\u{1F513} Connection closes on panel close"}
                     </button>
 
                     {keepConnectionOpen && (
@@ -1543,50 +1370,59 @@ function App() {
                 </div>
               )}
 
-              {assistantMode === 'live' && (
+              {assistantMode === "live" && (
                 <div className="flex h-full flex-col justify-between gap-6 overflow-y-auto">
                   <div className="space-y-4">
-                    <div className="max-h-[500px] overflow-y-auto pr-1" ref={chatScrollRef}>
+                    <div
+                      className="max-h-[500px] overflow-y-auto pr-1"
+                      ref={chatScrollRef}
+                    >
                       <div className="space-y-4">
-                        {
-                          <div className={`flex justify-center`}>
-                            <div
-                              className={`max-w-[35%] rounded-[18px] px-5 py-4 text-sm leading-6 shadow-sm bg-slate-100 flex flex-col items-center`}
-                            >
-                              <p>
-                                {new Date().toLocaleTimeString([], {
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                  second: '2-digit',
-                                  hour12: true,
-                                })}
-                              </p>
-                            </div>
+                        <div className={`flex justify-center`}>
+                          <div
+                            className={`max-w-[35%] rounded-[18px] px-5 py-4 text-sm leading-6 shadow-sm bg-slate-100 flex flex-col items-center`}
+                          >
+                            <p>
+                              {
+                                /* @__PURE__ */ new Date().toLocaleTimeString(
+                                  [],
+                                  {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                    second: "2-digit",
+                                    hour12: true,
+                                  },
+                                )
+                              }
+                            </p>
                           </div>
-                        }
+                        </div>
                         {liveHistory
-                          .filter(message => message.text.trim().length > 0 || message.audioUrl)
-                          .map(message => (
+                          .filter(
+                            (message) =>
+                              message.text.trim().length > 0 ||
+                              message.audioUrl,
+                          )
+                          .map((message) => (
                             <div
                               key={message.id}
-                              className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                              className={`flex ${message.sender === "user" ? "justify-end" : "justify-start"}`}
                             >
                               <div
-                                className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${
-                                  message.sender === 'user'
-                                    ? 'bg-slate-950 text-white rounded-br-none'
-                                    : 'bg-white text-slate-900 rounded-bl-none border border-slate-200'
-                                }`}
+                                className={`max-w-[85%] rounded-[28px] px-5 py-4 text-sm leading-6 shadow-sm ${message.sender === "user" ? "bg-slate-950 text-white rounded-br-none" : "bg-white text-slate-900 rounded-bl-none border border-slate-200"}`}
                               >
                                 <p>{message.text}</p>
-                                {message.audioUrl && <MessageAudioPlayer src={message.audioUrl} />}
+                                {message.audioUrl && (
+                                  <MessageAudioPlayer src={message.audioUrl} />
+                                )}
                               </div>
                             </div>
                           ))}
                         {totalLiveTime && (
                           <div>
                             <p className="text-xs text-slate-500">
-                              Total time: {totalLiveTime || getFormattedDifference()}
+                              Total time:{" "}
+                              {totalLiveTime || getFormattedDifference()}
                             </p>
                           </div>
                         )}
@@ -1594,20 +1430,24 @@ function App() {
                     </div>
 
                     <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
-                      <p className="font-semibold text-slate-900">Current status</p>
-                      <p className="mt-2 text-sm text-slate-600">
-                        {liveStatus === 'processing'
-                          ? 'Processing your question...'
-                          : liveStatus === 'speaking'
-                            ? 'Agent is speaking...'
-                            : liveStatus === 'listening'
-                              ? 'Ask anything about Praangan Elitus'
-                              : liveStatus === 'error'
-                                ? liveStatusText
-                                : 'Tap the button below to start your live session.'}
+                      <p className="font-semibold text-slate-900">
+                        Current status
                       </p>
-                      {liveStatus === 'error' && (
-                        <p className="mt-3 text-sm font-medium text-red-600">{liveStatusText}</p>
+                      <p className="mt-2 text-sm text-slate-600">
+                        {liveStatus === "processing"
+                          ? "Processing your question..."
+                          : liveStatus === "speaking"
+                            ? "Agent is speaking..."
+                            : liveStatus === "listening"
+                              ? "Ask anything about Praangan Elitus"
+                              : liveStatus === "error"
+                                ? liveStatusText
+                                : "Tap the button below to start your live session."}
+                      </p>
+                      {liveStatus === "error" && (
+                        <p className="mt-3 text-sm font-medium text-red-600">
+                          {liveStatusText}
+                        </p>
                       )}
                     </div>
                   </div>
@@ -1617,20 +1457,18 @@ function App() {
                       type="button"
                       onClick={startLiveSession}
                       disabled={!liveMicReady || liveSessionActive}
-                      className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-3 rounded-full px-5 py-4 text-sm font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                        liveSessionActive ? 'bg-emerald-600' : 'bg-slate-950 hover:bg-slate-800'
-                      }`}
+                      className={`flex-1 min-w-[180px] inline-flex items-center justify-center gap-3 rounded-full px-5 py-4 text-sm font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60 ${liveSessionActive ? "bg-emerald-600" : "bg-slate-950 hover:bg-slate-800"}`}
                     >
-                      {liveStatus === 'processing' && (
-                        <div className="h-5 w-5 animate-spin rounded-full border-4 border-gray-200 border-t-amber-500"></div>
+                      {liveStatus === "processing" && (
+                        <div className="h-5 w-5 animate-spin rounded-full border-4 border-gray-200 border-t-amber-500" />
                       )}
                       {liveSessionActive
-                        ? liveStatus === 'processing'
-                          ? 'Thinking...'
-                          : liveStatus === 'speaking'
-                            ? 'Speaking...'
-                            : 'Live session active'
-                        : 'Start Live Session'}
+                        ? liveStatus === "processing"
+                          ? "Thinking..."
+                          : liveStatus === "speaking"
+                            ? "Speaking..."
+                            : "Live session active"
+                        : "Start Live Session"}
                     </button>
 
                     {liveSessionActive && (
@@ -1669,5 +1507,5 @@ function App() {
     </>
   );
 }
-
-export default App;
+var App_default = App;
+export { App_default as default };
