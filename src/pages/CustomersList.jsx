@@ -96,12 +96,20 @@ const CustomersList = () => {
                                                 <div className="flex items-center gap-3 w-full sm:w-auto">
                                                     <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ${getLeadScoreClass(score)}`}>{score}</span>
                                                     <Link
-                                                        to={`/customers/${project_id}/conversation/${session?.session_id || ''}`}
-                                                        state={{ summary: item }}
+                                                        to={`/customers/${project_id}/${customer.id}`}
                                                         className="ml-auto sm:ml-0 inline-flex items-center justify-center rounded-md px-3 py-1 text-sm font-medium text-slate-600 hover:text-slate-900 border"
                                                     >
-                                                        View
+                                                        Details
                                                     </Link>
+                                                    {session && (
+                                                        <Link
+                                                            to={`/customers/${project_id}/conversation/${session?.session_id || ''}`}
+                                                            state={{ summary: item }}
+                                                            className="inline-flex items-center justify-center rounded-md px-3 py-1 text-sm font-medium text-slate-600 hover:text-slate-900 border"
+                                                        >
+                                                            View
+                                                        </Link>
+                                                    )}
                                                 </div>
                                             </div>
                                         </div>

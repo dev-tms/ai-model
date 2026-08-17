@@ -4,18 +4,18 @@ import { ChevronRight, History, LayoutDashboard, PhoneCall, Users, X } from "luc
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   {
-    to: "/conversations",
-    label: "Conversations",
-    icon: History,
-    isActive: (location) =>
-      location.pathname.startsWith("/conversations")
-  },
-  {
     to: "/customers",
     label: "Customers",
     icon: Users,
     isActive: (location) =>
       location.pathname.startsWith("/customers"),
+  },
+  {
+    to: "/conversations",
+    label: "Conversations",
+    icon: History,
+    isActive: (location) =>
+      location.pathname.startsWith("/conversations")
   },
 ];
 

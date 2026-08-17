@@ -7,6 +7,7 @@ import { DashboardPage } from "./features/dashboard/DashboardPage";
 import Conversations from "./pages/Conversations";
 import ConversationDetail from "./pages/ConversationDetail";
 import CustomersList from "./pages/CustomersList";
+import CustomerDetails from "./pages/CustomerDetails";
 // const HOST = "50.116.14.116:8000";
 const HOST = "192.168.40.20:8000";
 const CALL_WS_BASE_URL = `wss://${HOST}/ws/audio`;
@@ -1138,6 +1139,10 @@ function App() {
             />
             <Route path="/conversations" element={<Conversations />} />
             <Route path="/customers" element={<CustomersList />} />
+            <Route
+              path="/customers/:project_id/:customer_id"
+              element={<CustomerDetails />}
+            />
             <Route
               path="/customers/:project_id/conversation/:session_id"
               element={<ConversationDetail />}
